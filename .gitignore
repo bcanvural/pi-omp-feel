@@ -1,5 +1,8 @@
 # Dependencies
 node_modules/
+# The pi peer deps are linked from the global install, so the lockfile encodes
+# this machine's paths and is not portable.
+package-lock.json
 
 # Generated output and caches
 dist/

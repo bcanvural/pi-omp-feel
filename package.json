@@ -7,6 +7,9 @@
   "license": "MIT",
   "keywords": ["pi-package", "pi-extension", "theme", "omp", "catppuccin", "statusline"],
   "files": ["src", "themes", "README.md"],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "pi": {
     "extensions": ["./src/index.ts"],
     "themes": ["./themes"]
@@ -18,5 +21,9 @@
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": { "optional": true },
     "@earendil-works/pi-tui": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^7.0.2"
   }
 }
