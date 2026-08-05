@@ -1212,23 +1212,27 @@ function renderBashResultLines(rawLines: readonly string[], args: unknown): stri
       : undefined;
   const timeoutText = timeout !== undefined && Number.isFinite(timeout) ? ` | Timeout: ${timeout}s` : "";
 
-  const canFoldExit = rawLines.some(line => BASH_TOOK_PATTERN.test(stripAnsi(line).trim()));
+  // Strip each row once: this walks the rows three times, and stripping is the
+  // only expensive step in it.
+  const rows = rawLines.map(line => ({ line, plain: stripAnsi(line).trim() }));
+  const canFoldExit = rows.some(row => BASH_TOOK_PATTERN.test(row.plain));
+
   let exitCode: string | undefined;
-  const kept: string[] = [];
-  for (const line of rawLines) {
-    const exit = canFoldExit ? BASH_EXIT_PATTERN.exec(stripAnsi(line).trim()) : null;
+  const kept: typeof rows = [];
+  for (const row of rows) {
+    const exit = canFoldExit ? BASH_EXIT_PATTERN.exec(row.plain) : null;
     if (exit) {
       exitCode = exit[1];
       // pi separates the status row from the output with blank rows; they only
       // existed to set it apart, so they go with it.
-      while (kept.length > 0 && isBlankRenderedLine(kept[kept.length - 1])) kept.pop();
+      while (kept.length > 0 && kept[kept.length - 1].plain.length === 0) kept.pop();
       continue;
     }
-    kept.push(line);
+    kept.push(row);
   }
 
-  return kept.map(line => {
-    const took = BASH_TOOK_PATTERN.exec(stripAnsi(line).trim());
+  return kept.map(({ line, plain }) => {
+    const took = BASH_TOOK_PATTERN.exec(plain);
     if (!took) return line;
     const exitText = exitCode === undefined ? "" : ` | Exit: ${exitCode}`;
     return `${fgAnsi(HEX.overlay0)}⟨Wall: ${took[1]}${timeoutText}${exitText}⟩${FG_RESET}`;
