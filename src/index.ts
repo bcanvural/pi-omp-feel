@@ -460,7 +460,7 @@ function workingMessage(ctx: ExtensionContext, frame: number): string {
   const shimmer = [...text]
     .map((character, index) => {
       const distance = Math.abs(index - center);
-      const color = distance === 0 ? HEX.text : distance <= 2 ? accent : HEX.overlay0;
+      const color = distance <= 2 ? accent : HEX.overlay0;
       const bold = distance === 0 ? "\x1b[1m" : "";
       const boldReset = distance === 0 ? "\x1b[22m" : "";
       return `${bold}${fgAnsi(color)}${character}${FG_RESET}${boldReset}`;
@@ -492,10 +492,6 @@ function startWorkingShimmer(ctx: ExtensionContext): void {
   configureWorkingIndicator(ctx);
   let frame = 1;
   workingShimmerTimer = setInterval(() => {
-    if (ctx.isIdle()) {
-      stopWorkingShimmer();
-      return;
-    }
     ctx.ui.setWorkingMessage?.(workingMessage(ctx, frame++));
   }, 80);
   workingShimmerTimer.unref?.();
@@ -532,6 +528,13 @@ class OmpEditor extends CustomEditor {
     this.setPaddingX(2);
     this.getCtx = getCtx;
     this.getStatusLine = getStatusLine;
+  }
+
+  override setPaddingX(_padding: number): void {
+    // Pi copies the default editor's padding onto extension editors after the
+    // factory returns. Keep omp's two-cell geometry instead of accepting the
+    // default zero padding, which changes wrapping and breaks the side rails.
+    super.setPaddingX(2);
   }
 
   private updateBorderColor(): void {
