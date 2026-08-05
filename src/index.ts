@@ -1343,7 +1343,9 @@ type PatchableTool = { __ompFramed?: boolean };
  * otherwise re-background and re-pad every visible line on every keystroke. */
 interface FramedToolMemo {
   width: number;
-  stateKey: string;
+  /** Bitmask of the render-affecting flags; see `framedRender`. */
+  flags: number;
+  glyphPreset: GlyphPreset;
   rawCall: readonly string[];
   rawResult: readonly string[];
   imageKey: readonly { render(width: number): string[] }[];
@@ -1402,16 +1404,23 @@ function patchToolCallFraming(): void {
     }
     if (rawCall.length === 0 && rawResult.length === 0 && this.imageComponents.length === 0) return [];
 
-    // `args` is not part of the key: the bash branch reads `args.command` and
+    // `args` is not part of the memo key: the bash branch reads `args.command` and
     // `args.timeout`, and pi's call renderer derives its text from both, so any
     // change to either already shows up as changed `rawCall` lines. The one
     // exception is a falsy-but-present `timeout`, which the call renderer omits.
-    const stateKey = `${this.isPartial ? "p" : "d"}${this.executionStarted ? "r" : ""}${this.result?.isError ? "e" : ""}|${this.toolName}|${glyphPreset}`;
+    //
+    // A bitmask rather than a string: this is built for every tool block on every
+    // frame, before the memo can short-circuit, and the template literal it
+    // replaces cost ~24us per frame across 500 blocks. `toolName` needs no
+    // comparing — the memo is keyed on the component, which never changes tool.
+    const flags =
+      (this.isPartial ? 1 : 0) | (this.executionStarted ? 2 : 0) | (this.result?.isError ? 4 : 0);
     const memo = frameMemo.get(this);
     if (
       memo &&
       memo.width === width &&
-      memo.stateKey === stateKey &&
+      memo.flags === flags &&
+      memo.glyphPreset === glyphPreset &&
       memo.imageKey === this.imageComponents &&
       sameLines(memo.rawCall, rawCall) &&
       sameLines(memo.rawResult, rawResult)
@@ -1521,7 +1530,7 @@ function patchToolCallFraming(): void {
     // pi's core component owns one leading Spacer; keep it so consecutive
     // tool blocks have the same single blank separator as omp's transcript.
     lines.unshift("");
-    frameMemo.set(this, { width, stateKey, rawCall, rawResult, imageKey: this.imageComponents, lines });
+    frameMemo.set(this, { width, flags, glyphPreset, rawCall, rawResult, imageKey: this.imageComponents, lines });
     return lines;
   };
 
