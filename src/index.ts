@@ -140,6 +140,7 @@ const THINKING_DISPLAY: Record<string, string> = {
   max: "◉ max",
 };
 
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Small helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -276,8 +277,7 @@ function gitSegment(footerData: ReadonlyFooterDataProvider): Segment {
   return { content: `${fgAnsi(color)}${ICON.branch} ${branch}${FG_RESET}`, visible: true };
 }
 
-function contextPercentSegment(ctx: ExtensionContext): Segment {
-  const contextUsage = ctx.getContextUsage();
+function contextPercentSegment(ctx: ExtensionContext, contextUsage = ctx.getContextUsage()): Segment {
   const window = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
   const pct = contextUsage?.percent;
   const tokens = contextUsage?.tokens ?? 0;
@@ -332,24 +332,36 @@ function sessionNameSegment(ctx: ExtensionContext): Segment {
 class OmpFooter {
   private footerData: ReadonlyFooterDataProvider;
   private getCtx: () => ExtensionContext | undefined;
+  private cachedStatusBar?: { width: number; value: string };
+  private unsubscribeBranchChange?: () => void;
 
   constructor(footerData: ReadonlyFooterDataProvider, getCtx: () => ExtensionContext | undefined) {
     this.footerData = footerData;
     this.getCtx = getCtx;
+    this.unsubscribeBranchChange = footerData.onBranchChange(() => this.invalidate());
   }
 
   invalidate(): void {
-    // Data is read lazily from live ctx; nothing to cache.
+    this.cachedStatusBar = undefined;
   }
 
   dispose(): void {
-    // No owned resources.
+    this.unsubscribeBranchChange?.();
+    this.unsubscribeBranchChange = undefined;
   }
 
   renderStatusBar(width: number): string {
     const ctx = this.getCtx();
     if (!ctx) return "";
+    if (this.cachedStatusBar?.width === width) return this.cachedStatusBar.value;
 
+    const model = ctx.model as ({ id?: string; name?: string; reasoning?: boolean; contextWindow?: number } | undefined);
+    const contextUsage = ctx.getContextUsage();
+    const contextWindow = contextUsage?.contextWindow ?? model?.contextWindow ?? 0;
+    const contextPercent = contextUsage?.percent;
+    const contextTokens = contextUsage?.tokens ?? 0;
+    const branch = this.footerData.getGitBranch();
+    const sessionName = ctx.sessionManager.getSessionName();
     const usageTotals = createUsageTotals();
     for (const entry of ctx.sessionManager.getEntries()) {
       if (isAssistantMessageEntry(entry)) {
@@ -370,7 +382,7 @@ class OmpFooter {
       modelSegment(ctx),
       pathSegment(ctx),
       gitSegment(this.footerData),
-      contextPercentSegment(ctx),
+      contextPercentSegment(ctx, contextUsage),
       costSegment(ctx, usageTotals),
     ]) {
       if (segment.visible && segment.content) leftParts.push(segment.content);
@@ -380,7 +392,10 @@ class OmpFooter {
     const sessionSegment = sessionNameSegment(ctx);
     if (sessionSegment.visible && sessionSegment.content) rightParts.push(sessionSegment.content);
 
-    if (leftParts.length === 0 && rightParts.length === 0) return "";
+    if (leftParts.length === 0 && rightParts.length === 0) {
+      this.cachedStatusBar = { width, value: "" };
+      return "";
+    }
 
     const bg = bgAnsi(HEX.crust);
     const fg = fgAnsi(HEX.text);
@@ -417,12 +432,12 @@ class OmpFooter {
     } else {
       // omp: bridge the two groups with a border-colored `─` gap.
       const gapWidth = Math.max(1, width - leftWidth - rightWidth);
-      const sessionName = ctx.sessionManager.getSessionName();
       const gapColor = sessionName ? sessionAccentHex(sessionName) : HEX.blue;
       const gapFill = `${fgAnsi(gapColor)}${ICON.gap.repeat(gapWidth)}${FG_RESET}`;
       bar = leftGroup + gapFill + rightGroup;
     }
 
+    this.cachedStatusBar = { width, value: bar };
     return bar;
   }
 
@@ -922,19 +937,24 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   });
 
   pi.on("message_end", () => {
+    activeFooter?.invalidate();
     activeTui?.requestRender();
   });
   pi.on("tool_execution_end", () => {
+    activeFooter?.invalidate();
     activeTui?.requestRender();
   });
   pi.on("turn_end", () => {
+    activeFooter?.invalidate();
     activeTui?.requestRender();
   });
   pi.on("model_select", () => {
+    activeFooter?.invalidate();
     activeEditor?.invalidate();
     activeTui?.requestRender();
   });
   pi.on("thinking_level_select", () => {
+    activeFooter?.invalidate();
     activeEditor?.invalidate();
     activeTui?.requestRender();
   });
@@ -949,11 +969,13 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeTui?.requestRender();
   });
   pi.on("session_info_changed", () => {
+    activeFooter?.invalidate();
     if (currentCtx?.mode === "tui" && currentCtx.hasUI) configureWorkingIndicator(currentCtx);
     activeTui?.requestRender();
   });
 
   pi.on("session_shutdown", () => {
+    activeFooter?.dispose();
     activeTui = undefined;
     activeEditor = undefined;
     activeFooter = undefined;
