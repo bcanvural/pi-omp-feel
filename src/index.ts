@@ -7,7 +7,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -317,7 +317,12 @@ function gitSegment(footerData: ReadonlyFooterDataProvider): Segment {
   return { content: `${fgAnsi(color)}${ICON.branch} ${branch}${FG_RESET}`, visible: true };
 }
 
-function contextPercentSegment(ctx: ExtensionContext, contextUsage = ctx.getContextUsage()): Segment {
+// `contextUsage` is required rather than defaulted: `getContextUsage()` walks the
+// session branch, so the caller must fetch it once and pass it in.
+function contextPercentSegment(
+  ctx: ExtensionContext,
+  contextUsage: ReturnType<ExtensionContext["getContextUsage"]>,
+): Segment {
   const window = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
   const pct = contextUsage?.percent;
   const tokens = contextUsage?.tokens ?? 0;
@@ -520,22 +525,34 @@ class OmpFooter {
     return bar;
   }
 
-  render(width: number): string[] {
-    const lines: string[] = [];
+  private cachedStatusLines?: { width: number; key: string; lines: string[] };
 
+  render(width: number): string[] {
     // Extension statuses render below the bar, like omp's hook status lines.
+    // pi hands back its live Map, so this is called on every frame; the sort,
+    // ANSI strip and width clamp cost 6-15 µs each time for content that only
+    // changes when an extension calls setStatus. Key the result on the map
+    // contents — building that key is far cheaper than redoing the work.
     const extensionStatuses = this.footerData.getExtensionStatuses();
-    if (extensionStatuses.size > 0) {
-      const statusText = Array.from(extensionStatuses.entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([, text]) => sanitizeStatusText(stripAnsi(text)))
-        .filter(Boolean)
-        .join(" ");
-      if (statusText) {
-        lines.push(truncateToWidth(`${fgAnsi(HEX.overlay1)}${statusText}${FG_RESET}`, width, `${fgAnsi(HEX.overlay1)}…${FG_RESET}`));
-      }
+    if (extensionStatuses.size === 0) {
+      this.cachedStatusLines = undefined;
+      return [];
     }
 
+    let key = "";
+    for (const [statusKey, text] of extensionStatuses) key += `${statusKey} ${text}`;
+    const cached = this.cachedStatusLines;
+    if (cached && cached.width === width && cached.key === key) return cached.lines;
+
+    const statusText = Array.from(extensionStatuses.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([, text]) => sanitizeStatusText(stripAnsi(text)))
+      .filter(Boolean)
+      .join(" ");
+    const lines = statusText
+      ? [truncateToWidth(`${fgAnsi(HEX.overlay1)}${statusText}${FG_RESET}`, width, `${fgAnsi(HEX.overlay1)}…${FG_RESET}`)]
+      : [];
+    this.cachedStatusLines = { width, key, lines };
     return lines;
   }
 }
@@ -719,8 +736,11 @@ function reportDegraded(subsystem: DegradedSubsystem, error: unknown, context: R
     ].join("\n");
 
     mkdirSync(getAgentDir(), { recursive: true });
-    const keepExisting = existsSync(reportPath) && statSync(reportPath).size < DEGRADED_REPORT_MAX_BYTES;
-    writeFileSync(reportPath, (keepExisting ? readFileSync(reportPath, "utf8") : "") + entry);
+    // Append, so repeated failures across sessions accumulate — but start over
+    // once the log is large rather than reading it back to rewrite it.
+    const oversized = existsSync(reportPath) && statSync(reportPath).size >= DEGRADED_REPORT_MAX_BYTES;
+    if (oversized) writeFileSync(reportPath, entry);
+    else appendFileSync(reportPath, entry);
     wrote = true;
   } catch (writeError) {
     // Reporting must never mask the failure it is reporting, and never write to
@@ -1336,17 +1356,14 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
 
     ctx.ui.setHiddenThinkingLabel("…");
 
-    ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-      const editor = new OmpEditor(
+    ctx.ui.setEditorComponent((tui, theme, keybindings) =>
+      new OmpEditor(
         tui,
         theme,
         keybindings,
         () => currentCtx,
         (width) => activeFooter?.renderStatusBar(width) ?? "",
-      );
-      activeEditor = editor;
-      return editor;
-    });
+      ));
 
     ctx.ui.setFooter((tui, _theme, footerData) => {
       activeTui = tui;
@@ -1367,14 +1384,15 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeFooter?.invalidate();
     activeTui?.requestRender();
   });
+  // The editor needs no explicit invalidation: its border colour and top-border
+  // memo are both keyed on the values that change here, so the next render
+  // recomputes them on its own. (pi's `Editor.invalidate()` is a no-op anyway.)
   pi.on("model_select", () => {
     activeFooter?.invalidate();
-    activeEditor?.invalidate();
     activeTui?.requestRender();
   });
   pi.on("thinking_level_select", () => {
     activeFooter?.invalidate();
-    activeEditor?.invalidate();
     activeTui?.requestRender();
   });
   pi.on("agent_start", () => {
@@ -1397,7 +1415,6 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     activeFooter?.dispose();
     activeTui = undefined;
-    activeEditor = undefined;
     activeFooter = undefined;
     currentCtx = undefined;
     cachedSessionName = undefined;
@@ -1415,5 +1432,4 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
 // footer. The extension already assumes a single session per process.
 let currentCtx: ExtensionContext | undefined;
 let activeTui: TUI | undefined;
-let activeEditor: OmpEditor | undefined;
 let activeFooter: OmpFooter | undefined;
