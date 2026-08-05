@@ -105,9 +105,10 @@ const FG_RESET = "\x1b[39m";
 const ICON = {
   pi: "\ue22c",
   model: "\uec19",
-  // omp's status path uses the compact Nerd Font folder glyph rather than the
-  // two-cell emoji folder, which keeps the segment geometry stable.
-  folder: "\uf115",
+  // omp's status path uses this compact Nerd Font folder glyph rather than the
+  // two-cell emoji folder, which keeps the segment geometry stable. Verified
+  // against a capture of omp's own status line (U+F014, single cell).
+  folder: "\uf014",
   branch: "\uf126",
   context: "\ue70f",
   dot: " · ",
@@ -138,10 +139,14 @@ const STATUS_ICON = {
 
 // Tool-block frame colors (omp dark-catppuccin): accent border while running or
 // pending, error while failing, dim when done; title always accent.
+//
+// `accent` is peach, not blue. omp resolves it to `peach` in its theme and a
+// capture of omp's own frames confirms the header glyph and label render
+// #fab387; #89b4fa is omp's `border` color, which its output blocks do not use.
 const HEX_TOOL = {
-  accent: "#89b4fa",
-  error: "#f38ba8",
-  dim: "#6c7086",
+  accent: HEX.peach,
+  error: HEX.red,
+  dim: HEX.overlay0,
 } as const;
 
 // omp unicode thinking-level glyphs (`theme.thinking`).
@@ -303,10 +308,14 @@ function modelSegment(ctx: ExtensionContext): Segment {
   return { content: `${fgAnsi(HEX.pink)}${modelBadgeText(ctx)}${FG_RESET}`, visible: true };
 }
 
-function pathSegment(ctx: ExtensionContext): Segment {
+/** omp's default path clamp, and the floor it is never shrunk past. */
+const PATH_MAX_LENGTH = 40;
+const PATH_MIN_LENGTH = 12;
+
+function pathSegment(ctx: ExtensionContext, maxLength: number): Segment {
   let pwd = stripDisplayRoot(ctx.cwd);
   pwd = shortenPath(pwd);
-  pwd = clampPathLength(pwd, 40);
+  pwd = clampPathLength(pwd, maxLength);
   return { content: `${fgAnsi(HEX.teal)}${ICON.folder} ${pwd}${FG_RESET}`, visible: true };
 }
 
@@ -457,30 +466,6 @@ class OmpFooter {
     this.refreshUsage(ctx);
     const usageTotals = this.usageTotals;
 
-    // Collect visible segments (omp default preset: pi, model, mode, collab,
-    // path, git, pr, context_pct, cost on the left; session_name on the right.
-    // mode/collab/pr have no pi equivalent, so they render invisible).
-    const leftParts: string[] = [];
-    for (const segment of [
-      piSegment(),
-      modelSegment(ctx),
-      pathSegment(ctx),
-      gitSegment(this.footerData),
-      contextPercentSegment(ctx, contextUsage),
-      costSegment(usageTotals),
-    ]) {
-      if (segment.visible && segment.content) leftParts.push(segment.content);
-    }
-
-    const rightParts: string[] = [];
-    const sessionSegment = sessionNameSegment(sessionName);
-    if (sessionSegment.visible && sessionSegment.content) rightParts.push(sessionSegment.content);
-
-    if (leftParts.length === 0 && rightParts.length === 0) {
-      this.cachedStatusBar = { width, value: "" };
-      return "";
-    }
-
     const bg = bgAnsi(HEX.crust);
     const fg = fgAnsi(HEX.text);
     const sepFg = fgAnsi(HEX.surface1);
@@ -488,9 +473,48 @@ class OmpFooter {
     const groupWidth = (parts: string[]): number => {
       if (parts.length === 0) return 0;
       const partsWidth = parts.reduce((sum, part) => sum + visibleWidth(part), 0);
+      // One space either side of every separator, plus a leading and trailing
+      // pad cell, plus the one-cell powerline cap.
       const sepTotal = Math.max(0, parts.length - 1) * 3;
       return partsWidth + sepTotal + 2 + 1;
     };
+
+    // Collect visible segments (omp default preset: pi, model, mode, collab,
+    // path, git, pr, context_pct, cost on the left; session_name on the right.
+    // mode/collab/pr have no pi equivalent, so they render invisible).
+    const collect = (pathMaxLength: number) => {
+      const left: string[] = [];
+      for (const segment of [
+        piSegment(),
+        modelSegment(ctx),
+        pathSegment(ctx, pathMaxLength),
+        gitSegment(this.footerData),
+        contextPercentSegment(ctx, contextUsage),
+        costSegment(usageTotals),
+      ]) {
+        if (segment.visible && segment.content) left.push(segment.content);
+      }
+      const right: string[] = [];
+      const sessionSegment = sessionNameSegment(sessionName);
+      if (sessionSegment.visible && sessionSegment.content) right.push(sessionSegment.content);
+      return { left, right, total: groupWidth(left) + groupWidth(right) };
+    };
+
+    // The path is the only elastic segment, so when the bar does not fit, give
+    // back its excess rather than letting the whole line be clipped — clipping
+    // silently drops whatever sits at the end (the auto-compaction glyph, the
+    // cost, the closing cap). omp shortens the path the same way.
+    let parts = collect(PATH_MAX_LENGTH);
+    if (parts.total > width) {
+      parts = collect(Math.max(PATH_MIN_LENGTH, PATH_MAX_LENGTH - (parts.total - width)));
+    }
+    const leftParts = parts.left;
+    const rightParts = parts.right;
+
+    if (leftParts.length === 0 && rightParts.length === 0) {
+      this.cachedStatusBar = { width, value: "" };
+      return "";
+    }
 
     const renderGroup = (parts: string[], direction: "left" | "right"): string => {
       if (parts.length === 0) return "";
@@ -540,7 +564,7 @@ class OmpFooter {
     }
 
     let key = "";
-    for (const [statusKey, text] of extensionStatuses) key += `${statusKey} ${text}`;
+    for (const [statusKey, text] of extensionStatuses) key += `${statusKey}\u0000${text}\u0001`;
     const cached = this.cachedStatusLines;
     if (cached && cached.width === width && cached.key === key) return cached.lines;
 
@@ -559,10 +583,21 @@ class OmpFooter {
 
 const OMP_WORKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const OMP_WORKING_TEXT = "Working…";
+const OMP_WORKING_HINT = "⟨esc⟩";
 
-/** The shimmer band sweeps the label plus three cells of lead-in and lead-out on
- * either side, so it repeats every `label + 6` frames (see `workingMessage`). */
-const OMP_SHIMMER_PERIOD = [...OMP_WORKING_TEXT].length + 6;
+// The band sweeps the label *and* the Esc hint as one strip, then rests. Measured
+// off omp's own frames: the two cells either side of the peak carry the accent, a
+// further two fade through overlay1, and the sweep is followed by a stretch where
+// nothing is lit. Over the hint the peak is lavender rather than the accent.
+const SHIMMER_PEAK_RADIUS = 2;
+const SHIMMER_FADE_RADIUS = 4;
+const SHIMMER_REST_FRAMES = 8;
+
+/** Cells the band travels across: the label, the joining space, and the hint. */
+const OMP_SHIMMER_CELLS = [...OMP_WORKING_TEXT].length + 1 + [...OMP_WORKING_HINT].length;
+
+/** One full cycle: the band enters, crosses every cell, leaves, then rests. */
+const OMP_SHIMMER_PERIOD = OMP_SHIMMER_CELLS + 2 * SHIMMER_FADE_RADIUS + SHIMMER_REST_FRAMES;
 
 function leastCommonMultiple(a: number, b: number): number {
   const greatestCommonDivisor = (x: number, y: number): number => (y === 0 ? x : greatestCommonDivisor(y, x % y));
@@ -581,17 +616,26 @@ function workingAccent(ctx: ExtensionContext): string {
 }
 
 function workingMessage(accent: string, frame: number): string {
-  const center = (frame % OMP_SHIMMER_PERIOD) - 3;
-  const shimmer = [...OMP_WORKING_TEXT]
+  const labelCells = [...OMP_WORKING_TEXT];
+  const cells = [...labelCells, " ", ...OMP_WORKING_HINT];
+  const center = (frame % OMP_SHIMMER_PERIOD) - SHIMMER_FADE_RADIUS;
+
+  return cells
     .map((character, index) => {
       const distance = Math.abs(index - center);
-      const color = distance <= 2 ? accent : HEX.overlay0;
+      // The hint peaks lavender; the label peaks in the session accent.
+      const peak = index > labelCells.length ? HEX.lavender : accent;
+      const color =
+        distance <= SHIMMER_PEAK_RADIUS
+          ? peak
+          : distance <= SHIMMER_FADE_RADIUS
+            ? HEX.overlay1
+            : HEX.overlay0;
       const bold = distance === 0 ? "\x1b[1m" : "";
       const boldReset = distance === 0 ? "\x1b[22m" : "";
       return `${bold}${fgAnsi(color)}${character}${FG_RESET}${boldReset}`;
     })
     .join("");
-  return `${shimmer} ${fgAnsi(HEX.overlay0)}⟨esc⟩${FG_RESET}`;
 }
 
 // The frames depend on nothing but the accent, while `configureWorkingIndicator`
@@ -1303,8 +1347,16 @@ function patchToolCallFraming(): void {
       }
     } else {
       lines.push(buildFrameBar(width, "top", header, borderColor, barBg));
-      for (const line of rawCall) {
-        lines.push(addSideBorders(line, borderColor));
+      // pi's Box pads its children with a blank row above and below (paddingY 1).
+      // Inside a frame those read as empty rails, which omp's blocks do not have,
+      // so skip them. The rows are still needed for the background probe above, so
+      // they are dropped here rather than at the source.
+      let first = 0;
+      while (first < rawCall.length && isBlankRenderedLine(rawCall[first])) first++;
+      let last = rawCall.length;
+      while (last > first && isBlankRenderedLine(rawCall[last - 1])) last--;
+      for (let i = first; i < last; i++) {
+        lines.push(addSideBorders(rawCall[i], borderColor));
       }
     }
     for (let i = 0; i < this.imageComponents.length; i++) {
