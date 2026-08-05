@@ -149,7 +149,13 @@ const HEX_TOOL = {
   accent: HEX.peach,
   error: HEX.red,
   dim: HEX.overlay0,
+  // omp's `borderMuted`. Captures of its own frames show write blocks drawn with
+  // this rather than `dim`, which bash blocks use.
+  muted: HEX.surface0,
 } as const;
+
+/** Tools omp draws with `borderMuted` instead of `dim` once they have settled. */
+const TOOL_BORDER_MUTED = new Set(["write", "edit"]);
 
 // omp unicode thinking-level glyphs (`theme.thinking`).
 const THINKING_DISPLAY: Record<string, string> = {
@@ -1096,19 +1102,25 @@ function isBlankRenderedLine(line: string): boolean {
   return stripAnsi(line).trim().length === 0;
 }
 
-/** omp renders tools it gives no identity glyph to — `read` and friends — as a
- * single row instead of a block: an uncoloured bullet, the label in `toolTitle`,
- * then the target in `accent`. Neither of omp's glyph presets defines a
- * `tool.read`/`tool.grep`/`tool.ls` entry, which is how it marks them out.
- *
- * Rebuilt from pi's own content row rather than from `args`, so it needs no
- * per-tool knowledge of where the target lives. */
-function renderToolOneLine(contentLine: string): string {
+/** Split pi's `<tool> <target>` call row into its two halves, so both the
+ * one-line rows and the framed headers can name what the tool acted on without
+ * per-tool knowledge of where the target lives in `args`. Returns no target
+ * unless the row really does lead with this tool's name. */
+function splitToolCallRow(contentLine: string, toolName: string): { title: string; target: string } {
   const plain = sanitizeStatusText(stripAnsi(contentLine));
   const split = plain.indexOf(" ");
   const label = split === -1 ? plain : plain.slice(0, split);
-  const target = split === -1 ? "" : plain.slice(split + 1);
-  const title = `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+  const title = `${toolName.charAt(0).toUpperCase()}${toolName.slice(1)}`;
+  if (label.toLowerCase() !== toolName.toLowerCase()) return { title, target: "" };
+  return { title, target: split === -1 ? "" : plain.slice(split + 1) };
+}
+
+/** omp renders tools it gives no identity glyph to — `read` and friends — as a
+ * single row instead of a block: an uncoloured bullet, the label in `toolTitle`,
+ * then the target in `accent`. Neither of omp's glyph presets defines a
+ * `tool.read`/`tool.grep`/`tool.ls` entry, which is how it marks them out. */
+function renderToolOneLine(contentLine: string, toolName: string): string {
+  const { title, target } = splitToolCallRow(contentLine, toolName);
   const head = ` ${STATUS_ICON.bullet} ${fgAnsi(HEX.lavender)}${title}${FG_RESET}`;
   return target ? `${head} ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}` : head;
 }
@@ -1351,7 +1363,9 @@ function patchToolCallFraming(): void {
       ? HEX_TOOL.accent
       : this.result?.isError
         ? HEX_TOOL.error
-        : HEX_TOOL.dim;
+        : TOOL_BORDER_MUTED.has(this.toolName)
+          ? HEX_TOOL.muted
+          : HEX_TOOL.dim;
 
     let icon: string;
     let iconColor: string;
@@ -1413,12 +1427,28 @@ function patchToolCallFraming(): void {
         this.imageComponents.length > 0;
 
       if (framed) {
-        lines.push(buildFrameBar(width, "top", header, borderColor, barBg));
-        for (let i = first; i < last; i++) {
+        // omp names the target in the header — `Write: note.txt` — rather than
+        // repeating it as the first row of the body. Hoist pi's leading call row
+        // when there is one, but only if real content is left behind: an empty
+        // frame is worse than a repeated target.
+        const { title, target } = splitToolCallRow(rawCall[first], this.toolName);
+        let bodyStart = first;
+        let framedHeader = header;
+        if (target) {
+          let rest = first + 1;
+          while (rest < last && isBlankRenderedLine(rawCall[rest])) rest++;
+          if (rest < last) {
+            bodyStart = rest;
+            framedHeader = `${fgAnsi(iconColor)}${icon}${FG_RESET} ${fgAnsi(HEX_TOOL.accent)}${title}:${FG_RESET} ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}`;
+          }
+        }
+
+        lines.push(buildFrameBar(width, "top", framedHeader, borderColor, barBg));
+        for (let i = bodyStart; i < last; i++) {
           lines.push(addSideBorders(rawCall[i], borderColor));
         }
       } else {
-        lines.push(renderToolOneLine(rawCall[first]));
+        lines.push(renderToolOneLine(rawCall[first], this.toolName));
       }
     }
     for (let i = 0; i < this.imageComponents.length; i++) {
