@@ -3,7 +3,7 @@
 Ports the oh-my-pi (`omp`) "feel" to the pi coding agent via a pi extension.
 
 - **Theme**: ships `omp-dark-catppuccin`, byte-for-byte identical to omp's `dark-catppuccin` (Catppuccin Mocha, base `#1e1e2e`). The stock pi theme `catppuccin-mocha` is the same palette.
-- **Status line**: a single-line editor top border replacing the built-in footer — model + thinking level, working directory, git branch, token/cost stats, context %, and session name — in a `>`-separated omp-style layout.
+- **Status line**: a single-line editor top border replacing the built-in footer — model + thinking level, working directory, git branch, token/cost stats, context %, and session name — in an omp-style powerline-thin layout.
 - **Prompt input**: the input box is reshaped into omp's rounded-corner `╭──╮`/`╰──╯` frame with padded side rails and a correctly positioned cursor (via the supported `setEditorComponent` hook; editing, keybindings, and autocomplete stay on the stock `CustomEditor` core). The full status line occupies the top border, mirroring omp.
 - **Working indicator**: colored braille spinner (accent) while streaming.
 - **Hidden thinking label**: shows `…` instead of the default hidden-thinking text.

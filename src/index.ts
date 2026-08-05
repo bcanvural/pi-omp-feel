@@ -86,22 +86,23 @@ function bgAnsi(hex: string): string {
 const RESET = "\x1b[0m";
 const FG_RESET = "\x1b[39m";
 
-// omp unicode symbol preset (omp's default; the installed bundle resolves to it).
+// omp Nerd Font symbol preset used by the reference UI. These compact glyphs
+// avoid emoji-width drift in the status bar and match its powerline separators.
 const ICON = {
-  pi: "π",
-  model: "⬢",
+  pi: "\ue22c",
+  model: "\uec19",
   // omp's status path uses the compact Nerd Font folder glyph rather than the
   // two-cell emoji folder, which keeps the segment geometry stable.
   folder: "\uf115",
-  branch: "⑂",
-  context: "◫",
+  branch: "\uf126",
+  context: "\ue70f",
   dot: " · ",
-  sepLeft: ">",
-  sepRight: "<",
-  capLeft: "▶",
-  capRight: "◀",
+  sepLeft: "\ue0b1",
+  sepRight: "\ue0b3",
+  capLeft: "\ue0b0",
+  capRight: "\ue0b2",
   gap: "─",
-  auto: "⟲",
+  auto: "\u{f0068}",
 } as const;
 
 // omp tool-identity glyphs (unicode preset, `tool.*`), used on the success header
