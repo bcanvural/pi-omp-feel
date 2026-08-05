@@ -48,10 +48,13 @@ The guards cost nothing measurable: the latch plus `try`/`catch` adds ~0.1 ns pe
 
 omp ships `nerd`, `unicode` and `ascii` symbol presets. Its own default is `unicode`; **this extension defaults to `nerd`**, because that is what omp is configured with on the machine it was ported from, and because the status-line glyphs were always Nerd Font — so the two families used to disagree with each other.
 
+Everything the extension exposes lives under one command named after it:
+
 ```sh
-/omp-glyphs            # pick from a list
-/omp-glyphs unicode    # set directly (tab-completes)
-pi --omp-glyphs unicode  # this run only, not remembered
+/omp-feel                     # pick from a list
+/omp-feel glyphs unicode      # set directly (tab-completes at every position)
+/omp-feel unicode             # shorthand, the subcommand is optional
+pi --omp-feel-glyphs unicode  # this run only, not remembered
 ```
 
 The choice is remembered in `~/.pi/agent/pi-omp-feel.json`. Pick `unicode` if your terminal font has no Nerd Font glyphs — `✎ Write` instead of ` Write`, `◒ high` instead of `󰪣 high`.

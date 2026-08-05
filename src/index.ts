@@ -5,7 +5,7 @@ import type {
   KeybindingsManager,
   ReadonlyFooterDataProvider,
 } from "@earendil-works/pi-coding-agent";
-import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
+import type { AutocompleteItem, EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -1548,7 +1548,15 @@ function patchToolCallFraming(): void {
 }
 
 const GLYPH_PRESET_NAMES: readonly GlyphPreset[] = ["nerd", "unicode"];
-const GLYPH_FLAG = "omp-glyphs";
+
+// One command named after the extension, with the setting as a subcommand, so
+// everything it exposes stays under a single discoverable prefix rather than
+// claiming a top-level name per feature. Flags are flat, so that one carries the
+// setting in its name — matching how pi's bundled extensions namespace theirs.
+const COMMAND_NAME = "omp-feel";
+const GLYPH_SUBCOMMAND = "glyphs";
+const GLYPH_FLAG = "omp-feel-glyphs";
+const GLYPH_STATUS_KEY = "omp-feel-glyphs";
 
 export default function ompFeelExtension(pi: ExtensionAPI) {
   patchToolCallFraming();
@@ -1559,30 +1567,44 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     description: `Glyph preset for omp styling: ${GLYPH_PRESET_NAMES.join(" or ")}`,
   });
 
-  pi.registerCommand(GLYPH_FLAG, {
-    description: "Switch the glyph preset omp styling draws with (nerd or unicode)",
-    getArgumentCompletions: (prefix) =>
-      GLYPH_PRESET_NAMES.filter(name => name.startsWith(prefix)).map(name => ({
+  pi.registerCommand(COMMAND_NAME, {
+    description: `omp styling settings — ${GLYPH_SUBCOMMAND} <${GLYPH_PRESET_NAMES.join("|")}>`,
+    getArgumentCompletions: (argumentPrefix) => {
+      const prefix = argumentPrefix.trimStart();
+      const preset = (name: GlyphPreset): AutocompleteItem => ({
         value: name,
         label: name,
         description: name === glyphPreset ? "current" : "",
-      })),
+      });
+      // Once the subcommand is typed, only presets remain; before that, offer
+      // both so `/omp-feel nerd` works as a shorthand.
+      if (prefix.startsWith(`${GLYPH_SUBCOMMAND} `)) {
+        const rest = prefix.slice(GLYPH_SUBCOMMAND.length + 1).trimStart();
+        return GLYPH_PRESET_NAMES.filter(name => name.startsWith(rest)).map(preset);
+      }
+      const items: AutocompleteItem[] = GLYPH_SUBCOMMAND.startsWith(prefix)
+        ? [{ value: GLYPH_SUBCOMMAND, label: GLYPH_SUBCOMMAND, description: `currently ${glyphPreset}` }]
+        : [];
+      return [...items, ...GLYPH_PRESET_NAMES.filter(name => name.startsWith(prefix)).map(preset)];
+    },
     handler: async (args, ctx) => {
-      const requested = args.trim();
-      // No argument opens pi's own picker, so the setting is reachable without
-      // having to remember the preset names.
-      const chosen = requested.length > 0
-        ? requested
+      const words = args.trim().split(/\s+/).filter(Boolean);
+      if (words[0] === GLYPH_SUBCOMMAND) words.shift();
+
+      // Nothing left to act on opens pi's own picker, so the setting is reachable
+      // without having to remember the preset names.
+      const chosen = words.length > 0
+        ? words[0]
         : await ctx.ui.select("omp glyph preset", [...GLYPH_PRESET_NAMES]);
       if (chosen === undefined) return;
       if (!isGlyphPreset(chosen)) {
         ctx.ui.setStatus(
-          "omp-feel-glyphs",
+          GLYPH_STATUS_KEY,
           `omp-feel: unknown glyph preset "${sanitizeStatusText(chosen)}" — try ${GLYPH_PRESET_NAMES.join(" or ")}`,
         );
         return;
       }
-      ctx.ui.setStatus("omp-feel-glyphs", undefined);
+      ctx.ui.setStatus(GLYPH_STATUS_KEY, undefined);
       applyGlyphPreset(chosen);
     },
   });
