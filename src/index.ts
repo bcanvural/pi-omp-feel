@@ -64,13 +64,19 @@ function hslToHex(hue: number, saturation: number, lightness: number): string {
     .join("")}`;
 }
 
+const sessionAccentCache = new Map<string, string>();
+
 /** Match omp's stable warm accent for a named session on a dark theme. */
 function sessionAccentHex(name: string): string {
+  const cached = sessionAccentCache.get(name);
+  if (cached !== undefined) return cached;
   let hash = 5381;
   for (let i = 0; i < name.length; i++) {
     hash = (((hash << 5) + hash) ^ name.charCodeAt(i)) >>> 0;
   }
-  return hslToHex(hash % 120, 0.9, 0.72);
+  const hex = hslToHex(hash % 120, 0.9, 0.72);
+  sessionAccentCache.set(name, hex);
+  return hex;
 }
 
 function fgAnsi(hex: string): string {
@@ -140,6 +146,17 @@ const THINKING_DISPLAY: Record<string, string> = {
   max: "◉ max",
 };
 
+// Border colors per thinking level when no session accent applies.
+const THINKING_COLOR: Record<string, string> = {
+  minimal: HEX.overlay0,
+  low: HEX.blue,
+  medium: HEX.sapphire,
+  high: HEX.mauve,
+  xhigh: HEX.pink,
+  max: HEX.pink,
+  off: HEX.surface0,
+};
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Small helpers
@@ -149,6 +166,13 @@ const RESET_SEQ = /[\u001b\u009b][[()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PRZcf-nq
 
 function stripAnsi(text: string): string {
   return text.replace(RESET_SEQ, "");
+}
+
+const FLAT_BORDER = /^─+$/;
+
+/** True for the plain `─` rows the stock Editor draws as its top/bottom border. */
+function isFlatBorderLine(line: string): boolean {
+  return FLAT_BORDER.test(stripAnsi(line));
 }
 
 function sanitizeStatusText(text: string): string {
@@ -318,8 +342,7 @@ function costSegment(ctx: ExtensionContext, usageTotals: UsageTotals): Segment {
   return { content: `${fgAnsi(HEX.maroon)}$${usageTotals.cost.toFixed(2)}${FG_RESET}`, visible: true };
 }
 
-function sessionNameSegment(ctx: ExtensionContext): Segment {
-  const name = ctx.sessionManager.getSessionName();
+function sessionNameSegment(name: string | undefined): Segment {
   if (!name) return { content: "", visible: false };
   return { content: `${fgAnsi(sessionAccentHex(name))}${sanitizeStatusText(name)}${FG_RESET}`, visible: true };
 }
@@ -329,11 +352,40 @@ function sessionNameSegment(ctx: ExtensionContext): Segment {
 // the main bar is rendered through the editor's top border).
 // ═══════════════════════════════════════════════════════════════════════════
 
+// `sessionManager.getSessionName()` builds a filtered copy of the whole session
+// log on every call, so it must never run from a render path — the editor
+// re-renders on every keystroke. Refresh it on the events that can change it
+// and read the cached value while rendering.
+let cachedSessionName: string | undefined;
+let cachedSessionNameValid = false;
+
+function refreshSessionName(ctx: ExtensionContext | undefined): void {
+  if (!ctx) {
+    // Drop the cache rather than marking an empty name valid: without a context
+    // there is nothing to read, and a later read with a real context must scan
+    // instead of trusting this.
+    cachedSessionName = undefined;
+    cachedSessionNameValid = false;
+    return;
+  }
+  cachedSessionName = ctx.sessionManager.getSessionName();
+  cachedSessionNameValid = true;
+}
+
+function currentSessionName(ctx: ExtensionContext): string | undefined {
+  if (!cachedSessionNameValid) refreshSessionName(ctx);
+  return cachedSessionName;
+}
+
 class OmpFooter {
   private footerData: ReadonlyFooterDataProvider;
   private getCtx: () => ExtensionContext | undefined;
   private cachedStatusBar?: { width: number; value: string };
   private unsubscribeBranchChange?: () => void;
+  // Incremental usage totals: the session log is append-only, so totals only
+  // need the entries added since the last refresh instead of a full rescan.
+  private usageTotals = createUsageTotals();
+  private entriesSeen = 0;
 
   constructor(footerData: ReadonlyFooterDataProvider, getCtx: () => ExtensionContext | undefined) {
     this.footerData = footerData;
@@ -343,6 +395,23 @@ class OmpFooter {
 
   invalidate(): void {
     this.cachedStatusBar = undefined;
+    refreshSessionName(this.getCtx());
+  }
+
+  /** Fold entries appended since the last refresh into the running totals. */
+  private refreshUsage(ctx: ExtensionContext): void {
+    const entries = ctx.sessionManager.getEntries();
+    for (let i = this.entriesSeen; i < entries.length; i++) {
+      const entry = entries[i];
+      if (isAssistantMessageEntry(entry)) {
+        addUsageToTotals(this.usageTotals, entry.message.usage);
+      } else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
+        addUsageToTotals(this.usageTotals, entry.message.usage as never);
+      } else if ((entry.type === "branch_summary" || entry.type === "compaction") && (entry as { usage?: unknown }).usage) {
+        addUsageToTotals(this.usageTotals, (entry as { usage: unknown }).usage as never);
+      }
+    }
+    this.entriesSeen = entries.length;
   }
 
   dispose(): void {
@@ -355,23 +424,10 @@ class OmpFooter {
     if (!ctx) return "";
     if (this.cachedStatusBar?.width === width) return this.cachedStatusBar.value;
 
-    const model = ctx.model as ({ id?: string; name?: string; reasoning?: boolean; contextWindow?: number } | undefined);
     const contextUsage = ctx.getContextUsage();
-    const contextWindow = contextUsage?.contextWindow ?? model?.contextWindow ?? 0;
-    const contextPercent = contextUsage?.percent;
-    const contextTokens = contextUsage?.tokens ?? 0;
-    const branch = this.footerData.getGitBranch();
-    const sessionName = ctx.sessionManager.getSessionName();
-    const usageTotals = createUsageTotals();
-    for (const entry of ctx.sessionManager.getEntries()) {
-      if (isAssistantMessageEntry(entry)) {
-        addUsageToTotals(usageTotals, entry.message.usage);
-      } else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
-        addUsageToTotals(usageTotals, entry.message.usage as never);
-      } else if ((entry.type === "branch_summary" || entry.type === "compaction") && (entry as { usage?: unknown }).usage) {
-        addUsageToTotals(usageTotals, (entry as { usage: unknown }).usage as never);
-      }
-    }
+    const sessionName = currentSessionName(ctx);
+    this.refreshUsage(ctx);
+    const usageTotals = this.usageTotals;
 
     // Collect visible segments (omp default preset: pi, model, mode, collab,
     // path, git, pr, context_pct, cost on the left; session_name on the right.
@@ -389,7 +445,7 @@ class OmpFooter {
     }
 
     const rightParts: string[] = [];
-    const sessionSegment = sessionNameSegment(ctx);
+    const sessionSegment = sessionNameSegment(sessionName);
     if (sessionSegment.visible && sessionSegment.content) rightParts.push(sessionSegment.content);
 
     if (leftParts.length === 0 && rightParts.length === 0) {
@@ -464,7 +520,7 @@ class OmpFooter {
 const OMP_WORKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 function workingAccent(ctx: ExtensionContext): string {
-  const sessionName = ctx.sessionManager.getSessionName();
+  const sessionName = currentSessionName(ctx);
   return sessionName ? sessionAccentHex(sessionName) : HEX.peach;
 }
 
@@ -545,24 +601,21 @@ class OmpEditor extends CustomEditor {
     super.setPaddingX(2);
   }
 
+  private lastBorderColorState?: string;
+
   private updateBorderColor(): void {
     const ctx = this.getCtx();
     if (!ctx) {
+      if (this.lastBorderColorState === "base") return;
+      this.lastBorderColorState = "base";
       this.borderColor = this.baseBorderColor;
       return;
     }
-    const sessionName = ctx.sessionManager.getSessionName();
+    const sessionName = currentSessionName(ctx);
     const thinkingLevel = ctx.thinkingLevel || "off";
-    const thinkingColor: Record<string, string> = {
-      minimal: HEX.overlay0,
-      low: HEX.blue,
-      medium: HEX.sapphire,
-      high: HEX.mauve,
-      xhigh: HEX.pink,
-      max: HEX.pink,
-      off: HEX.surface0,
-    };
-    const color = sessionName ? sessionAccentHex(sessionName) : thinkingColor[thinkingLevel] ?? HEX.surface0;
+    const color = sessionName ? sessionAccentHex(sessionName) : (THINKING_COLOR[thinkingLevel] ?? HEX.surface0);
+    if (this.lastBorderColorState === color) return;
+    this.lastBorderColorState = color;
     this.borderColor = (text: string): string => `${fgAnsi(color)}${text}${FG_RESET}`;
   }
 
@@ -583,19 +636,34 @@ class OmpEditor extends CustomEditor {
     return `${fgAnsi(HEX.pink)}${text}${FG_RESET}`;
   }
 
+  private topBorderMemo?: { width: number; status: string; borderState: string; line: string };
+
   private buildRoundedTop(width: number): string {
     const left = "╭──";
     const right = "──╮";
     const fillWidth = Math.max(0, width - visibleWidth(left) - visibleWidth(right));
-    const maxStatus = fillWidth;
-    const status = this.topBorderStatus(maxStatus);
-    if (status) {
-      const clamped = truncateToWidth(status, maxStatus, `${fgAnsi(HEX.pink)}…${FG_RESET}`);
-      const clampedWidth = visibleWidth(clamped);
-      const fill = Math.max(0, fillWidth - clampedWidth);
-      return `${this.borderColor(left)}${clamped}${this.borderColor("─".repeat(fill))}${this.borderColor(right)}`;
+    const status = this.topBorderStatus(fillWidth) ?? "";
+
+    // The status line is dense with ANSI escapes, so clamping it takes
+    // truncateToWidth's slow per-character path. It only changes when the footer
+    // is invalidated, so memoize the finished row rather than rebuilding it on
+    // every keystroke.
+    const borderState = this.lastBorderColorState ?? "";
+    const memo = this.topBorderMemo;
+    if (memo && memo.width === width && memo.borderState === borderState && memo.status === status) {
+      return memo.line;
     }
-    return `${this.borderColor(left)}${this.borderColor("─".repeat(fillWidth))}${this.borderColor(right)}`;
+
+    let line: string;
+    if (status) {
+      const clamped = truncateToWidth(status, fillWidth, `${fgAnsi(HEX.pink)}…${FG_RESET}`);
+      const fill = Math.max(0, fillWidth - visibleWidth(clamped));
+      line = `${this.borderColor(left)}${clamped}${this.borderColor("─".repeat(fill))}${this.borderColor(right)}`;
+    } else {
+      line = `${this.borderColor(left)}${this.borderColor("─".repeat(fillWidth))}${this.borderColor(right)}`;
+    }
+    this.topBorderMemo = { width, status, borderState, line };
+    return line;
   }
 
   override render(width: number): string[] {
@@ -610,11 +678,16 @@ class OmpEditor extends CustomEditor {
     // row when the editor is not scrolled (a scrolled prompt swaps it for a `↑`
     // scroll row, which never matches all-dashes); the bottom border is the last
     // all-dashes row. Autocomplete rows render below the bottom border untouched.
-    const isFlatBorder = (line: string): boolean => /^─+$/.test(stripAnsi(line));
-    const topIndex = isFlatBorder(lines[0]) ? 0 : -1;
+    // Scanning backwards with an early exit finds the same last flat row as a
+    // forward scan, but with autocomplete closed the bottom border is the final
+    // line — one strip-and-test instead of one per rendered line.
+    const topIndex = isFlatBorderLine(lines[0]) ? 0 : -1;
     let bottomIndex = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (isFlatBorder(lines[i])) bottomIndex = i;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (isFlatBorderLine(lines[i])) {
+        bottomIndex = i;
+        break;
+      }
     }
 
     if (topIndex >= 0) lines[topIndex] = this.buildRoundedTop(width);
@@ -624,10 +697,17 @@ class OmpEditor extends CustomEditor {
     // their stock layout.
     const firstContent = topIndex >= 0 ? topIndex + 1 : 0;
     const lastContent = bottomIndex >= 0 ? bottomIndex : lines.length;
+    // The stock Editor already pads every row to exactly `innerWidth`, so the
+    // common case needs neither a truncate nor a pad — skipping them avoids
+    // truncateToWidth's per-character ANSI walk on the cursor row, which changes
+    // (and so never caches) on every keystroke.
+    const railEdge = this.borderColor("│");
     const rail = (text: string): string => {
-      const content = truncateToWidth(text, innerWidth);
-      const padded = `${content}${" ".repeat(Math.max(0, innerWidth - visibleWidth(content)))}`;
-      return `${this.borderColor("│")}${padded}${this.borderColor("│")}`;
+      const textWidth = visibleWidth(text);
+      if (textWidth === innerWidth) return `${railEdge}${text}${railEdge}`;
+      const content = textWidth > innerWidth ? truncateToWidth(text, innerWidth) : text;
+      const contentWidth = textWidth > innerWidth ? visibleWidth(content) : textWidth;
+      return `${railEdge}${content}${" ".repeat(Math.max(0, innerWidth - contentWidth))}${railEdge}`;
     };
     for (let i = firstContent; i < lastContent; i++) {
       const isLastContent = i === lastContent - 1;
@@ -639,13 +719,24 @@ class OmpEditor extends CustomEditor {
       // omp folds the bottom corners into the final editable row instead of
       // drawing a separate bottom border. This leaves an empty prompt as a
       // two-row open frame rather than a full rectangle.
-      const raw = truncateToWidth(lines[i], innerWidth);
+      const rawWidth = visibleWidth(lines[i]);
+      const raw = rawWidth > innerWidth ? truncateToWidth(lines[i], innerWidth) : lines[i];
       let middle = raw.startsWith("  ") ? raw.slice(2) : raw;
       if (middle.endsWith("  ")) middle = middle.slice(0, -2);
       const middleWidth = Math.max(0, width - 6);
-      middle = truncateToWidth(middle, middleWidth);
-      middle = `${middle}${" ".repeat(Math.max(0, middleWidth - visibleWidth(middle)))}`;
-      lines[i] = truncateToWidth(`${this.borderColor("╰─ ")}${middle}${this.borderColor(" ─╯")}`, width);
+      let middleCurrentWidth = visibleWidth(middle);
+      if (middleCurrentWidth > middleWidth) {
+        middle = truncateToWidth(middle, middleWidth);
+        middleCurrentWidth = visibleWidth(middle);
+      }
+      if (middleCurrentWidth < middleWidth) {
+        middle = `${middle}${" ".repeat(middleWidth - middleCurrentWidth)}`;
+      }
+      // `╰─ ` and ` ─╯` are three cells each, so once `middle` is exactly
+      // `middleWidth` the row is exactly `width` wide by construction. Only the
+      // degenerate narrow case, where the corners alone overflow, needs a clamp.
+      const cornered = `${this.borderColor("╰─ ")}${middle}${this.borderColor(" ─╯")}`;
+      lines[i] = width >= 6 ? cornered : truncateToWidth(cornered, width);
     }
     if (bottomIndex >= 0 && bottomIndex !== topIndex) {
       lines.splice(bottomIndex, 1);
@@ -684,7 +775,11 @@ function extractBgAnsi(line: string): string {
 
 /** Wrap a bg-tinted box row with `│` side borders (bg preserved, border-colored). */
 function addSideBorders(line: string, width: number, borderColor: string): string {
-  const m = line.match(/^(\x1b\[48;2;\d+;\d+;\d+m)([\s\S]*?)(\x1b\[49m)$/) ?? line.match(/^(\x1b\[48;5;\d+m)([\s\S]*?)(\x1b\[49m)$/);
+  const m = line.startsWith("\x1b[48;2;")
+    ? line.match(/^(\x1b\[48;2;\d+;\d+;\d+m)([\s\S]*?)(\x1b\[49m)$/)
+    : line.startsWith("\x1b[48;5;")
+      ? line.match(/^(\x1b\[48;5;\d+m)([\s\S]*?)(\x1b\[49m)$/)
+      : null;
   if (!m) return line;
   const [, bgPrefix, body, bgReset] = m;
   const border = `${fgAnsi(borderColor)}│${FG_RESET}`;
@@ -774,30 +869,45 @@ function renderToolPart(part: RenderableToolPart | undefined, width: number): st
   return lines;
 }
 
+// The command string of a given tool call never changes, but the block
+// re-renders (and re-highlights) on every state change — including each
+// streaming chunk. Cache the tokenized output, bounded by command count.
+const bashHighlightCache = new Map<string, string[]>();
+const BASH_HIGHLIGHT_CACHE_MAX = 64;
+
+function highlightBashCommand(command: string): string[] {
+  const cached = bashHighlightCache.get(command);
+  if (cached !== undefined) return cached;
+  if (bashHighlightCache.size >= BASH_HIGHLIGHT_CACHE_MAX) bashHighlightCache.clear();
+  const highlighted = highlightCode(command, "bash");
+  bashHighlightCache.set(command, highlighted);
+  return highlighted;
+}
+
 /** Re-render pi's bold bash call in omp's dim-prefix/syntax-highlighted style. */
-function renderBashCall(part: RenderableToolPart | undefined, width: number, args: unknown): string[] {
+function renderBashCallLines(rawLines: readonly string[], args: unknown): string[] {
   const command =
     args && typeof args === "object" && typeof (args as { command?: unknown }).command === "string"
       ? (args as { command: string }).command.replace(/\t/g, "   ")
       : "";
-  if (!command) return renderToolPart(part, width);
+  if (!command) return [...rawLines];
 
-  const highlighted = highlightCode(command, "bash");
-  if (highlighted.length === 0) return renderToolPart(part, width);
+  const highlighted = highlightBashCommand(command);
+  if (highlighted.length === 0) return [...rawLines];
   const prefix = `${fgAnsi(HEX.overlay0)}$ ${FG_RESET}`;
   return highlighted.map((line, index) => (index === 0 ? `${prefix}${line}` : line));
 }
 
 /** Match omp's wall-time badge without fabricating a timeout when pi did not
  * supply one in the tool arguments. */
-function renderBashResult(part: RenderableToolPart | undefined, width: number, args: unknown): string[] {
+function renderBashResultLines(rawLines: readonly string[], args: unknown): string[] {
   const timeout =
     args && typeof args === "object" && typeof (args as { timeout?: unknown }).timeout === "number"
       ? (args as { timeout: number }).timeout
       : undefined;
   const timeoutText = timeout !== undefined && Number.isFinite(timeout) ? ` | Timeout: ${timeout}s` : "";
 
-  return renderToolPart(part, width).map(line => {
+  return rawLines.map(line => {
     const plain = stripAnsi(line).trim();
     const match = plain.match(/^Took\s+(.+)$/);
     if (!match) return line;
@@ -811,7 +921,9 @@ interface FramedToolComponent {
   hideComponent: boolean;
   hasRendererDefinition(): boolean;
   getRenderShell(): string;
-  contentBox: { render(width: number): string[] };
+  // `bgFn` is declared private in Box's .d.ts but is a plain public field at
+  // runtime; Box itself samples it to validate its own cache.
+  contentBox: { render(width: number): string[]; bgFn?: (text: string) => string };
   contentText: { render(width: number): string[] };
   args?: unknown;
   callRendererComponent?: RenderableToolPart;
@@ -826,22 +938,89 @@ interface FramedToolComponent {
 
 type PatchableTool = { __ompFramed?: boolean };
 
+/** Memo entry for the patched tool-frame renderer. Comparing the raw lines a
+ * block was last framed from detects "nothing changed" without re-doing any
+ * framing work — and because pi's Box/Text/Markdown caches hand back the same
+ * line arrays while content is unchanged, the comparison usually settles on
+ * identical references. Returning the memoized array on a hit also keeps the
+ * output reference-stable for the transcript's own Box caches, which would
+ * otherwise re-background and re-pad every visible line on every keystroke. */
+interface FramedToolMemo {
+  width: number;
+  stateKey: string;
+  rawCall: readonly string[];
+  rawResult: readonly string[];
+  imageKey: readonly { render(width: number): string[] }[];
+  lines: string[];
+}
+
+function sameLines(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 function patchToolCallFraming(): void {
   const proto = ToolExecutionComponent.prototype as unknown as PatchableTool & { render(width: number): string[] };
   if (proto.__ompFramed) return;
   proto.__ompFramed = true;
 
   const originalRender = proto.render;
+  const frameMemo = new WeakMap<FramedToolComponent, FramedToolMemo>();
   proto.render = function (this: FramedToolComponent, width: number): string[] {
     if (this.hideComponent) return [];
     if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
       return originalRender.call(this, width);
     }
 
-    const boxLines = this.hasRendererDefinition()
-      ? this.contentBox.render(width)
-      : this.contentText.render(width);
-    if (boxLines.length === 0 && this.imageComponents.length === 0) return [];
+    const isBash = this.toolName === "bash" && this.callRendererComponent !== undefined;
+
+    // Raw, reference-stable inputs. When nothing changed, pi's component
+    // caches hand back identical line arrays, so the memo below skips all
+    // framing work and returns the previous output array.
+    //
+    // The bash branch deliberately does not render `contentBox`. Its children
+    // are the very same call/result components framed below at `width - 4`, and
+    // their caches key on a single width — rendering the box at `width` too
+    // makes the two calls invalidate each other, so every frame re-wraps the
+    // whole command output twice. Only the background tint is needed from the
+    // box, and probing `bgFn` yields it in constant time.
+    let boxLines: string[] | undefined;
+    let rawCall: readonly string[];
+    let rawResult: readonly string[];
+    if (isBash) {
+      const innerWidth = Math.max(1, width - 4);
+      rawCall = renderToolPart(this.callRendererComponent, innerWidth);
+      rawResult = this.resultRendererComponent
+        ? renderToolPart(this.resultRendererComponent, innerWidth)
+        : [];
+    } else {
+      boxLines = this.hasRendererDefinition()
+        ? this.contentBox.render(width)
+        : this.contentText.render(width);
+      rawCall = boxLines;
+      rawResult = [];
+    }
+    if (rawCall.length === 0 && rawResult.length === 0 && this.imageComponents.length === 0) return [];
+
+    // `args` is not part of the key: the bash branch reads `args.command` and
+    // `args.timeout`, and pi's call renderer derives its text from both, so any
+    // change to either already shows up as changed `rawCall` lines. The one
+    // exception is a falsy-but-present `timeout`, which the call renderer omits.
+    const stateKey = `${this.isPartial ? "p" : "d"}${this.executionStarted ? "r" : ""}${this.result?.isError ? "e" : ""}|${this.toolName}`;
+    const memo = frameMemo.get(this);
+    if (
+      memo &&
+      memo.width === width &&
+      memo.stateKey === stateKey &&
+      memo.imageKey === this.imageComponents &&
+      sameLines(memo.rawCall, rawCall) &&
+      sameLines(memo.rawResult, rawResult)
+    ) {
+      return memo.lines;
+    }
 
     const borderColor = this.isPartial
       ? HEX_TOOL.accent
@@ -863,17 +1042,20 @@ function patchToolCallFraming(): void {
     }
 
     const header = `${fgAnsi(iconColor)}${icon}${FG_RESET} ${fgAnsi(HEX_TOOL.accent)}${this.toolName}${FG_RESET}`;
-    const barBg = extractBgAnsi(boxLines[0] ?? "");
+    // `theme.bg()` returns `<bg-ansi><text>\x1b[49m`, so an empty probe carries
+    // the same background prefix a rendered box row would.
+    const barBg = boxLines
+      ? extractBgAnsi(boxLines[0] ?? "")
+      : extractBgAnsi(this.contentBox.bgFn?.("") ?? "");
 
     const lines: string[] = [];
-    if (this.toolName === "bash" && this.callRendererComponent) {
+    if (isBash) {
       // omp's bash renderer intentionally has no tool-title header. Its command
       // is the first section, followed by a labeled Output divider once a
       // result exists. Render pi's call/result components independently to
       // remove the Box's vertical padding and preserve that structure.
-      const innerWidth = Math.max(1, width - 4);
-      const callLines = renderBashCall(this.callRendererComponent, innerWidth, this.args);
-      const resultLines = renderBashResult(this.resultRendererComponent, innerWidth, this.args);
+      const callLines = renderBashCallLines(rawCall, this.args);
+      const resultLines = renderBashResultLines(rawResult, this.args);
       lines.push(buildFrameBar(width, "top", "", borderColor, barBg));
       for (const line of callLines) {
         lines.push(renderFrameContentRow(line, width, borderColor, barBg));
@@ -886,7 +1068,7 @@ function patchToolCallFraming(): void {
       }
     } else {
       lines.push(buildFrameBar(width, "top", header, borderColor, barBg));
-      for (const line of boxLines) {
+      for (const line of rawCall) {
         lines.push(addSideBorders(line, width, borderColor));
       }
     }
@@ -900,6 +1082,7 @@ function patchToolCallFraming(): void {
     // pi's core component owns one leading Spacer; keep it so consecutive
     // tool blocks have the same single blank separator as omp's transcript.
     lines.unshift("");
+    frameMemo.set(this, { width, stateKey, rawCall, rawResult, imageKey: this.imageComponents, lines });
     return lines;
   } as typeof proto.render;
 }
@@ -911,6 +1094,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     currentCtx = ctx;
     activeFooter = undefined;
+    refreshSessionName(ctx);
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
 
     configureWorkingIndicator(ctx);
@@ -969,6 +1153,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeTui?.requestRender();
   });
   pi.on("session_info_changed", () => {
+    refreshSessionName(currentCtx);
     activeFooter?.invalidate();
     if (currentCtx?.mode === "tui" && currentCtx.hasUI) configureWorkingIndicator(currentCtx);
     activeTui?.requestRender();
@@ -980,6 +1165,8 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeEditor = undefined;
     activeFooter = undefined;
     currentCtx = undefined;
+    cachedSessionName = undefined;
+    cachedSessionNameValid = false;
   });
 }
 
