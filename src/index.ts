@@ -105,10 +105,12 @@ const FG_RESET = "\x1b[39m";
 const ICON = {
   pi: "\ue22c",
   model: "\uec19",
-  // omp's status path uses this compact Nerd Font folder glyph rather than the
-  // two-cell emoji folder, which keeps the segment geometry stable. Verified
-  // against a capture of omp's own status line (U+F014, single cell).
-  folder: "\uf014",
+  // omp's `icon.folder` in the nerd preset; its unicode preset uses a two-cell
+  // emoji folder, and this single-cell glyph keeps the segment geometry stable.
+  // Careful: omp swaps in `icon.scratchFolder` (U+F014) when the cwd is a scratch
+  // directory, and that one looks like a trash can. A capture taken under /tmp
+  // shows it and is not evidence about the folder icon.
+  folder: "\uf115",
   branch: "\uf126",
   context: "\ue70f",
   dot: " · ",
