@@ -7,7 +7,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,25 +120,6 @@ const ICON = {
   auto: "\u{f0068}",
 } as const;
 
-// omp tool-identity glyphs (unicode preset, `tool.*`), used on the success header
-// of a framed tool-call block. Tools without an entry fall back to the model badge.
-const TOOL_ICON: Record<string, string> = {
-  bash: "❯",
-  write: "✎",
-  edit: "✎",
-  ssh: "⇄",
-  mcp: "🔌",
-};
-
-// omp status glyphs (unicode preset, `status.*`) for the pending/error tool header,
-// plus its `format.bullet` for one-line tool rows (nerd preset renders it U+F111).
-const STATUS_ICON = {
-  pending: "⏳",
-  running: "⟳",
-  error: "✘",
-  bullet: "•",
-} as const;
-
 // Tool-block frame colors (omp dark-catppuccin): accent border while running or
 // pending, error while failing, dim when done; title always accent.
 //
@@ -157,26 +138,103 @@ const HEX_TOOL = {
 /** Tools omp draws with `borderMuted` instead of `dim` once they have settled. */
 const TOOL_BORDER_MUTED = new Set(["write", "edit"]);
 
-// omp unicode thinking-level glyphs (`theme.thinking`).
-const THINKING_DISPLAY: Record<string, string> = {
-  minimal: "○ min",
-  low: "◔ low",
-  medium: "◑ med",
-  high: "◒ high",
-  xhigh: "◕ xhigh",
-  max: "◉ max",
+// ═══════════════════════════════════════════════════════════════════════════
+// Glyph presets
+//
+// omp ships `nerd`, `unicode` and `ascii` presets and defaults to `unicode`.
+// This defaults to `nerd`: it is what omp is actually configured with on the
+// machine this was ported from, and what the status-line glyphs above already
+// use, so the two families were previously inconsistent. Change it with
+// `/omp-glyphs`, or `--omp-glyphs <preset>` for a single run.
+//
+// Values are omp's own `tool.*`, `status.*`, `format.bullet` and `thinking.*`
+// entries. Its status-line segment glyphs are not preset-dependent, so the ICON
+// table above is shared by both.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type GlyphPreset = "nerd" | "unicode";
+
+interface GlyphSet {
+  /** omp `tool.*`. A tool with no entry here is one omp renders as a single row
+   * rather than a block, which is what `framed` keys off. */
+  tool: Record<string, string>;
+  status: { pending: string; running: string; error: string; bullet: string };
+  thinking: Record<string, string>;
+}
+
+const GLYPH_PRESETS: Record<GlyphPreset, GlyphSet> = {
+  nerd: {
+    tool: { bash: "\uebca", write: "\uea7f", edit: "\uea73", ssh: "\ueb3a", mcp: "\ueb2d" },
+    status: { pending: "\uf254", running: "\uf110", error: "\uf00d", bullet: "\u2022" },
+    thinking: {
+      minimal: "\u{f0a9e} min",
+      low: "\u{f0a9f} low",
+      medium: "\u{f0aa1} med",
+      high: "\u{f0aa3} high",
+      xhigh: "\u{f0aa5} xhi",
+      max: "\u{f06d} max",
+    },
+  },
+  unicode: {
+    tool: { bash: "\u276f", write: "\u270e", edit: "\u270e", ssh: "\u21c4", mcp: "\u{1f50c}" },
+    status: { pending: "\u23f3", running: "\u27f3", error: "\u2718", bullet: "\u2022" },
+    thinking: {
+      minimal: "\u25cb min",
+      low: "\u25d4 low",
+      medium: "\u25d1 med",
+      high: "\u25d2 high",
+      xhigh: "\u25d5 xhigh",
+      max: "\u25c9 max",
+    },
+  },
 };
 
-// Border colors per thinking level when no session accent applies.
-const THINKING_COLOR: Record<string, string> = {
-  minimal: HEX.overlay0,
-  low: HEX.blue,
-  medium: HEX.sapphire,
-  high: HEX.mauve,
-  xhigh: HEX.pink,
-  max: HEX.pink,
-  off: HEX.surface0,
-};
+const DEFAULT_GLYPH_PRESET: GlyphPreset = "nerd";
+let glyphPreset: GlyphPreset = DEFAULT_GLYPH_PRESET;
+
+function glyphs(): GlyphSet {
+  return GLYPH_PRESETS[glyphPreset];
+}
+
+function isGlyphPreset(value: unknown): value is GlyphPreset {
+  return value === "nerd" || value === "unicode";
+}
+
+const SETTINGS_FILE_NAME = "pi-omp-feel.json";
+
+/** Remember the chosen preset across sessions. pi has no per-extension settings
+ * store, so keep a small file of our own beside the degrade report. */
+function loadGlyphPreset(): void {
+  try {
+    const path = join(getAgentDir(), SETTINGS_FILE_NAME);
+    if (!existsSync(path)) return;
+    const stored = JSON.parse(readFileSync(path, "utf8")) as { glyphs?: unknown };
+    if (isGlyphPreset(stored.glyphs)) glyphPreset = stored.glyphs;
+  } catch {
+    // An unreadable or malformed settings file must not stop the extension
+    // loading; the default preset applies instead.
+  }
+}
+
+function saveGlyphPreset(): void {
+  try {
+    mkdirSync(getAgentDir(), { recursive: true });
+    writeFileSync(join(getAgentDir(), SETTINGS_FILE_NAME), `${JSON.stringify({ glyphs: glyphPreset }, null, 2)}\n`);
+  } catch {
+    // Persisting is best effort — the choice still holds for this session.
+  }
+}
+
+function applyGlyphPreset(preset: GlyphPreset): void {
+  if (glyphPreset === preset) return;
+  glyphPreset = preset;
+  saveGlyphPreset();
+  // Framed tool blocks fold the preset into their memo key, so they refresh
+  // themselves. The status bar and the editor's top border need telling.
+  activeFooter?.invalidate();
+  activeTui?.requestRender();
+}
+
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -306,7 +364,7 @@ function modelBadgeText(ctx: ExtensionContext): string {
   if (ctx.model?.reasoning) {
     const level = ctx.thinkingLevel || "off";
     if (level !== "off") {
-      text += `${ICON.dot}${THINKING_DISPLAY[level] ?? level}`;
+      text += `${ICON.dot}${glyphs().thinking[level] ?? level}`;
     }
   }
   return text;
@@ -857,8 +915,10 @@ class OmpEditor extends CustomEditor {
       return;
     }
     const sessionName = currentSessionName(ctx);
-    const thinkingLevel = ctx.thinkingLevel || "off";
-    const color = sessionName ? sessionAccentHex(sessionName) : (THINKING_COLOR[thinkingLevel] ?? HEX.surface0);
+    // omp leaves the frame dim until it has a session accent to colour it with,
+    // rather than tinting it by thinking level — the level is already spelled out
+    // in the status bar a few cells away.
+    const color = sessionName ? sessionAccentHex(sessionName) : HEX.overlay0;
     if (this.lastBorderColorState === color) return;
     this.lastBorderColorState = color;
     this.borderColor = (text: string): string => `${fgAnsi(color)}${text}${FG_RESET}`;
@@ -1121,7 +1181,7 @@ function splitToolCallRow(contentLine: string, toolName: string): { title: strin
  * `tool.read`/`tool.grep`/`tool.ls` entry, which is how it marks them out. */
 function renderToolOneLine(contentLine: string, toolName: string): string {
   const { title, target } = splitToolCallRow(contentLine, toolName);
-  const head = ` ${STATUS_ICON.bullet} ${fgAnsi(HEX.lavender)}${title}${FG_RESET}`;
+  const head = ` ${glyphs().status.bullet} ${fgAnsi(HEX.lavender)}${title}${FG_RESET}`;
   return target ? `${head} ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}` : head;
 }
 
@@ -1346,7 +1406,7 @@ function patchToolCallFraming(): void {
     // `args.timeout`, and pi's call renderer derives its text from both, so any
     // change to either already shows up as changed `rawCall` lines. The one
     // exception is a falsy-but-present `timeout`, which the call renderer omits.
-    const stateKey = `${this.isPartial ? "p" : "d"}${this.executionStarted ? "r" : ""}${this.result?.isError ? "e" : ""}|${this.toolName}`;
+    const stateKey = `${this.isPartial ? "p" : "d"}${this.executionStarted ? "r" : ""}${this.result?.isError ? "e" : ""}|${this.toolName}|${glyphPreset}`;
     const memo = frameMemo.get(this);
     if (
       memo &&
@@ -1370,13 +1430,13 @@ function patchToolCallFraming(): void {
     let icon: string;
     let iconColor: string;
     if (this.isPartial) {
-      icon = this.executionStarted ? STATUS_ICON.running : STATUS_ICON.pending;
+      icon = this.executionStarted ? glyphs().status.running : glyphs().status.pending;
       iconColor = this.executionStarted ? HEX_TOOL.accent : HEX_TOOL.dim;
     } else if (this.result?.isError) {
-      icon = STATUS_ICON.error;
+      icon = glyphs().status.error;
       iconColor = HEX_TOOL.error;
     } else {
-      icon = TOOL_ICON[this.toolName] ?? ICON.model;
+      icon = glyphs().tool[this.toolName] ?? ICON.model;
       iconColor = HEX_TOOL.accent;
     }
 
@@ -1422,7 +1482,7 @@ function patchToolCallFraming(): void {
       // can be hidden. Failures stay framed too, so the error text has a home.
       framed =
         last - first !== 1 ||
-        TOOL_ICON[this.toolName] !== undefined ||
+        glyphs().tool[this.toolName] !== undefined ||
         this.result?.isError === true ||
         this.imageComponents.length > 0;
 
@@ -1487,10 +1547,50 @@ function patchToolCallFraming(): void {
   } as typeof proto.render;
 }
 
+const GLYPH_PRESET_NAMES: readonly GlyphPreset[] = ["nerd", "unicode"];
+const GLYPH_FLAG = "omp-glyphs";
+
 export default function ompFeelExtension(pi: ExtensionAPI) {
   patchToolCallFraming();
+  loadGlyphPreset();
+
+  pi.registerFlag(GLYPH_FLAG, {
+    type: "string",
+    description: `Glyph preset for omp styling: ${GLYPH_PRESET_NAMES.join(" or ")}`,
+  });
+
+  pi.registerCommand(GLYPH_FLAG, {
+    description: "Switch the glyph preset omp styling draws with (nerd or unicode)",
+    getArgumentCompletions: (prefix) =>
+      GLYPH_PRESET_NAMES.filter(name => name.startsWith(prefix)).map(name => ({
+        value: name,
+        label: name,
+        description: name === glyphPreset ? "current" : "",
+      })),
+    handler: async (args, ctx) => {
+      const requested = args.trim();
+      // No argument opens pi's own picker, so the setting is reachable without
+      // having to remember the preset names.
+      const chosen = requested.length > 0
+        ? requested
+        : await ctx.ui.select("omp glyph preset", [...GLYPH_PRESET_NAMES]);
+      if (chosen === undefined) return;
+      if (!isGlyphPreset(chosen)) {
+        ctx.ui.setStatus(
+          "omp-feel-glyphs",
+          `omp-feel: unknown glyph preset "${sanitizeStatusText(chosen)}" — try ${GLYPH_PRESET_NAMES.join(" or ")}`,
+        );
+        return;
+      }
+      ctx.ui.setStatus("omp-feel-glyphs", undefined);
+      applyGlyphPreset(chosen);
+    },
+  });
 
   pi.on("session_start", (_event, ctx) => {
+    // A flag applies to this run only, so it is not written back to the file.
+    const flag = pi.getFlag(GLYPH_FLAG);
+    if (isGlyphPreset(flag)) glyphPreset = flag;
     currentCtx = ctx;
     activeFooter = undefined;
     refreshSessionName(ctx);

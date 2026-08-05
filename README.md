@@ -44,6 +44,20 @@ pi @~/.pi/agent/pi-omp-feel-degraded.md "fix this"
 
 The guards cost nothing measurable: the latch plus `try`/`catch` adds ~0.1 ns per render call, and reporting only runs on the single failure.
 
+## Glyph presets
+
+omp ships `nerd`, `unicode` and `ascii` symbol presets. Its own default is `unicode`; **this extension defaults to `nerd`**, because that is what omp is configured with on the machine it was ported from, and because the status-line glyphs were always Nerd Font — so the two families used to disagree with each other.
+
+```sh
+/omp-glyphs            # pick from a list
+/omp-glyphs unicode    # set directly (tab-completes)
+pi --omp-glyphs unicode  # this run only, not remembered
+```
+
+The choice is remembered in `~/.pi/agent/pi-omp-feel.json`. Pick `unicode` if your terminal font has no Nerd Font glyphs — `✎ Write` instead of ` Write`, `◒ high` instead of `󰪣 high`.
+
+The preset covers the three families omp defines twice over: tool identity (`tool.*`), status (`status.*`, `format.bullet`) and thinking levels (`thinking.*`). The status-line segment glyphs (`` `` `` `` ``) are not preset-dependent in omp, so both presets share them — a font without Nerd Font coverage will still show boxes there.
+
 ## Comparing against omp
 
 Fidelity claims here are checked against omp's actual output, not against memory. `tools/compare/` drives both agents through a real PTY (tmux at a fixed size) and records the rendered cells **with** their escape sequences, so the two can be diffed by colour and codepoint. That catches what eyes cannot: a colour one shade off, `U+F115` where omp uses `U+F014`, a clamp that silently drops the last segment.
