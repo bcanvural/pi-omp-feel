@@ -471,30 +471,23 @@ function workingMessage(ctx: ExtensionContext, frame: number): string {
 
 function configureWorkingIndicator(ctx: ExtensionContext): void {
   const accent = workingAccent(ctx);
+  const frameCount = OMP_WORKING_FRAMES.length + 6;
   ctx.ui.setWorkingIndicator({
-    frames: OMP_WORKING_FRAMES.map(frame => `${fgAnsi(accent)}${frame}${FG_RESET}`),
+    // Pi treats supplied frames as verbatim. Include the message in each frame
+    // so the Loader's own 80 ms animation advances the shimmer reliably rather
+    // than relying on a second timer that can be replaced by core status events.
+    frames: Array.from({ length: frameCount }, (_, index) => {
+      const spinner = OMP_WORKING_FRAMES[index % OMP_WORKING_FRAMES.length];
+      return `${fgAnsi(accent)}${spinner}${FG_RESET} ${workingMessage(ctx, index)}`;
+    }),
     intervalMs: 80,
   });
   // omp uses a Unicode ellipsis and an explicit Esc hint instead of pi's
   // default ASCII message. ANSI is nested deliberately so pi's muted wrapper
   // still leaves the main label and hint in their omp colors.
-  ctx.ui.setWorkingMessage?.(workingMessage(ctx, 0));
-}
-
-function stopWorkingShimmer(): void {
-  if (!workingShimmerTimer) return;
-  clearInterval(workingShimmerTimer);
-  workingShimmerTimer = undefined;
-}
-
-function startWorkingShimmer(ctx: ExtensionContext): void {
-  stopWorkingShimmer();
-  configureWorkingIndicator(ctx);
-  let frame = 1;
-  workingShimmerTimer = setInterval(() => {
-    ctx.ui.setWorkingMessage?.(workingMessage(ctx, frame++));
-  }, 80);
-  workingShimmerTimer.unref?.();
+  // The frame itself carries the message; clear Pi's separate message slot so
+  // it does not append the default static "Working..." text.
+  ctx.ui.setWorkingMessage?.("");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -901,7 +894,6 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   let currentCtx: ExtensionContext | undefined;
 
   pi.on("session_start", (_event, ctx) => {
-    stopWorkingShimmer();
     currentCtx = ctx;
     activeFooter = undefined;
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
@@ -936,7 +928,6 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeTui?.requestRender();
   });
   pi.on("turn_end", () => {
-    stopWorkingShimmer();
     activeTui?.requestRender();
   });
   pi.on("model_select", () => {
@@ -948,15 +939,13 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeTui?.requestRender();
   });
   pi.on("agent_start", () => {
-    if (currentCtx?.mode === "tui" && currentCtx.hasUI) startWorkingShimmer(currentCtx);
+    if (currentCtx?.mode === "tui" && currentCtx.hasUI) configureWorkingIndicator(currentCtx);
     activeTui?.requestRender();
   });
   pi.on("agent_end", () => {
-    stopWorkingShimmer();
     activeTui?.requestRender();
   });
   pi.on("agent_settled", () => {
-    stopWorkingShimmer();
     activeTui?.requestRender();
   });
   pi.on("session_info_changed", () => {
@@ -965,7 +954,6 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
-    stopWorkingShimmer();
     activeTui = undefined;
     activeEditor = undefined;
     activeFooter = undefined;
@@ -976,4 +964,3 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
 let activeTui: TUI | undefined;
 let activeEditor: OmpEditor | undefined;
 let activeFooter: OmpFooter | undefined;
-let workingShimmerTimer: ReturnType<typeof setInterval> | undefined;
