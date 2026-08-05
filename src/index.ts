@@ -130,11 +130,13 @@ const TOOL_ICON: Record<string, string> = {
   mcp: "🔌",
 };
 
-// omp status glyphs (unicode preset, `status.*`) for the pending/error tool header.
+// omp status glyphs (unicode preset, `status.*`) for the pending/error tool header,
+// plus its `format.bullet` for one-line tool rows (nerd preset renders it U+F111).
 const STATUS_ICON = {
   pending: "⏳",
   running: "⟳",
   error: "✘",
+  bullet: "•",
 } as const;
 
 // Tool-block frame colors (omp dark-catppuccin): accent border while running or
@@ -1094,6 +1096,23 @@ function isBlankRenderedLine(line: string): boolean {
   return stripAnsi(line).trim().length === 0;
 }
 
+/** omp renders tools it gives no identity glyph to — `read` and friends — as a
+ * single row instead of a block: an uncoloured bullet, the label in `toolTitle`,
+ * then the target in `accent`. Neither of omp's glyph presets defines a
+ * `tool.read`/`tool.grep`/`tool.ls` entry, which is how it marks them out.
+ *
+ * Rebuilt from pi's own content row rather than from `args`, so it needs no
+ * per-tool knowledge of where the target lives. */
+function renderToolOneLine(contentLine: string): string {
+  const plain = sanitizeStatusText(stripAnsi(contentLine));
+  const split = plain.indexOf(" ");
+  const label = split === -1 ? plain : plain.slice(0, split);
+  const target = split === -1 ? "" : plain.slice(split + 1);
+  const title = `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+  const head = ` ${STATUS_ICON.bullet} ${fgAnsi(HEX.lavender)}${title}${FG_RESET}`;
+  return target ? `${head} ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}` : head;
+}
+
 interface RenderableToolPart {
   render(width: number): string[];
 }
@@ -1176,8 +1195,16 @@ function renderBashCallLines(rawLines: readonly string[], args: unknown): string
   return highlighted.map((line, index) => (index === 0 ? `${prefix}${line}` : line));
 }
 
+const BASH_TOOK_PATTERN = /^Took\s+(.+)$/;
+const BASH_EXIT_PATTERN = /^Command exited with code (\d+)$/;
+
 /** Match omp's wall-time badge without fabricating a timeout when pi did not
- * supply one in the tool arguments. */
+ * supply one in the tool arguments.
+ *
+ * omp also folds a non-zero exit status into that badge — `⟨Wall: 0.01s |
+ * Exit: 2⟩` — where pi devotes a whole row to it, preceded by blank rows. Fold
+ * it the same way, but only when there is a badge to fold it into, so the status
+ * can never be dropped if pi changes how it reports one. */
 function renderBashResultLines(rawLines: readonly string[], args: unknown): string[] {
   const timeout =
     args && typeof args === "object" && typeof (args as { timeout?: unknown }).timeout === "number"
@@ -1185,11 +1212,26 @@ function renderBashResultLines(rawLines: readonly string[], args: unknown): stri
       : undefined;
   const timeoutText = timeout !== undefined && Number.isFinite(timeout) ? ` | Timeout: ${timeout}s` : "";
 
-  return rawLines.map(line => {
-    const plain = stripAnsi(line).trim();
-    const match = plain.match(/^Took\s+(.+)$/);
-    if (!match) return line;
-    return `${fgAnsi(HEX.overlay0)}⟨Wall: ${match[1]}${timeoutText}⟩${FG_RESET}`;
+  const canFoldExit = rawLines.some(line => BASH_TOOK_PATTERN.test(stripAnsi(line).trim()));
+  let exitCode: string | undefined;
+  const kept: string[] = [];
+  for (const line of rawLines) {
+    const exit = canFoldExit ? BASH_EXIT_PATTERN.exec(stripAnsi(line).trim()) : null;
+    if (exit) {
+      exitCode = exit[1];
+      // pi separates the status row from the output with blank rows; they only
+      // existed to set it apart, so they go with it.
+      while (kept.length > 0 && isBlankRenderedLine(kept[kept.length - 1])) kept.pop();
+      continue;
+    }
+    kept.push(line);
+  }
+
+  return kept.map(line => {
+    const took = BASH_TOOK_PATTERN.exec(stripAnsi(line).trim());
+    if (!took) return line;
+    const exitText = exitCode === undefined ? "" : ` | Exit: ${exitCode}`;
+    return `${fgAnsi(HEX.overlay0)}⟨Wall: ${took[1]}${timeoutText}${exitText}⟩${FG_RESET}`;
   });
 }
 
@@ -1328,6 +1370,7 @@ function patchToolCallFraming(): void {
       : extractBgAnsi(this.contentBox.bgFn?.("") ?? "");
 
     const lines: string[] = [];
+    let framed = true;
     if (isBash) {
       // omp's bash renderer intentionally has no tool-title header. Its command
       // is the first section, followed by a labeled Output divider once a
@@ -1346,7 +1389,6 @@ function patchToolCallFraming(): void {
         }
       }
     } else {
-      lines.push(buildFrameBar(width, "top", header, borderColor, barBg));
       // pi's Box pads its children with a blank row above and below (paddingY 1).
       // Inside a frame those read as empty rails, which omp's blocks do not have,
       // so skip them. The rows are still needed for the background probe above, so
@@ -1355,8 +1397,24 @@ function patchToolCallFraming(): void {
       while (first < rawCall.length && isBlankRenderedLine(rawCall[first])) first++;
       let last = rawCall.length;
       while (last > first && isBlankRenderedLine(rawCall[last - 1])) last--;
-      for (let i = first; i < last; i++) {
-        lines.push(addSideBorders(rawCall[i], borderColor));
+
+      // A tool omp gives no identity glyph to, whose whole block is a single row,
+      // is one of its one-line tools. Requiring that single row is what keeps this
+      // safe for the rest: a `grep` with matches still gets its frame, so no output
+      // can be hidden. Failures stay framed too, so the error text has a home.
+      framed =
+        last - first !== 1 ||
+        TOOL_ICON[this.toolName] !== undefined ||
+        this.result?.isError === true ||
+        this.imageComponents.length > 0;
+
+      if (framed) {
+        lines.push(buildFrameBar(width, "top", header, borderColor, barBg));
+        for (let i = first; i < last; i++) {
+          lines.push(addSideBorders(rawCall[i], borderColor));
+        }
+      } else {
+        lines.push(renderToolOneLine(rawCall[first]));
       }
     }
     for (let i = 0; i < this.imageComponents.length; i++) {
@@ -1365,7 +1423,7 @@ function patchToolCallFraming(): void {
       const imageComponent = this.imageComponents[i];
       if (imageComponent) lines.push(...imageComponent.render(width));
     }
-    lines.push(buildFrameBar(width, "bottom", "", borderColor, barBg));
+    if (framed) lines.push(buildFrameBar(width, "bottom", "", borderColor, barBg));
     // pi's core component owns one leading Spacer; keep it so consecutive
     // tool blocks have the same single blank separator as omp's transcript.
     lines.unshift("");
