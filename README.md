@@ -44,6 +44,41 @@ pi @~/.pi/agent/pi-omp-feel-degraded.md "fix this"
 
 The guards cost nothing measurable: the latch plus `try`/`catch` adds ~0.1 ns per render call, and reporting only runs on the single failure.
 
+## Comparing against omp
+
+Fidelity claims here are checked against omp's actual output, not against memory. `tools/compare/` drives both agents through a real PTY (tmux at a fixed size) and records the rendered cells **with** their escape sequences, so the two can be diffed by colour and codepoint. That catches what eyes cannot: a colour one shade off, `U+F115` where omp uses `U+F014`, a clamp that silently drops the last segment.
+
+```sh
+# a throwaway workspace, so tool calls cannot touch anything real
+W=$(mktemp -d) && (cd "$W" && git init -q && echo hi > README.md &&
+  git add -A && git -c user.email=x@y -c user.name=x commit -qm init)
+
+P="Do these steps using tools, no commentary: 1 run bash echo hello 2 write a file note.txt containing alpha"
+tools/compare/capture.sh cmp-pi  pi  "$W" "pi"  "$P"
+tools/compare/capture.sh cmp-omp omp "$W" "omp" "$P"
+
+# structure first, from the plain-text captures
+grep -n '╭──\|├───' pi-final.txt omp-final.txt
+
+# then exact colours and glyphs, per run (line numbers match the .txt files)
+node tools/compare/decode.mjs omp-final.ansi 'GPT'
+node tools/compare/decode.mjs pi-final.ansi 33
+```
+
+Animations come out of the `-anim-NN.ansi` samples, taken 150 ms apart. Note that a shimmering label puts ANSI *between* letters, so a substring needle will not match it — address those lines by number:
+
+```sh
+for n in 03 05 07 09; do
+  printf '%s: ' "$n"
+  node tools/compare/decode.mjs pi-anim-$n.ansi \
+    "$(grep -n Working pi-anim-$n.ansi | head -1 | cut -d: -f1)" |
+    sed 1d | awk '{printf "[%s]%s ", substr($1,4), $3}'
+  echo
+done
+```
+
+Two cautions. Passing a prompt runs a real turn: it spends tokens and lets the agent execute tools, which is why the workspace must be disposable — `capture.sh` also refuses to type a prompt unless it can see the prompt frame, because otherwise the keystrokes reach the shell and get executed. And omp is far ahead of pi in version, so a difference is not automatically a porting bug; it may be something pi has no equivalent for.
+
 ## Development
 
 ```sh
