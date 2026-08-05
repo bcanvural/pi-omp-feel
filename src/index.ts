@@ -414,8 +414,11 @@ class OmpFooter {
   }
 
   invalidate(): void {
+    // Deliberately does not refresh the session name: `getSessionName()` walks
+    // the whole session log, and the name can only change through
+    // `setSessionName` (which emits `session_info_changed`) or the `--name` flag
+    // at startup — both of which refresh it directly.
     this.cachedStatusBar = undefined;
-    refreshSessionName(this.getCtx());
   }
 
   /** Fold entries appended since the last refresh into the running totals. */
@@ -560,8 +563,7 @@ function workingAccent(ctx: ExtensionContext): string {
   return sessionName ? sessionAccentHex(sessionName) : HEX.peach;
 }
 
-function workingMessage(ctx: ExtensionContext, frame: number): string {
-  const accent = workingAccent(ctx);
+function workingMessage(accent: string, frame: number): string {
   const center = (frame % OMP_SHIMMER_PERIOD) - 3;
   const shimmer = [...OMP_WORKING_TEXT]
     .map((character, index) => {
@@ -575,17 +577,27 @@ function workingMessage(ctx: ExtensionContext, frame: number): string {
   return `${shimmer} ${fgAnsi(HEX.overlay0)}⟨esc⟩${FG_RESET}`;
 }
 
+// The frames depend on nothing but the accent, while `configureWorkingIndicator`
+// runs on every `agent_start`. Rebuilding all 70 every turn threw away ~14 KB per
+// turn for an identical result, so keep the last set.
+let cachedWorkingFrames: { accent: string; frames: string[] } | undefined;
+
+function workingFrames(accent: string): string[] {
+  if (cachedWorkingFrames?.accent === accent) return cachedWorkingFrames.frames;
+  // Pi treats supplied frames as verbatim. Include the message in each frame so
+  // the Loader's own 80 ms animation advances the shimmer reliably rather than
+  // relying on a second timer that can be replaced by core status events.
+  const frames = Array.from({ length: OMP_WORKING_FRAME_COUNT }, (_, index) => {
+    const spinner = OMP_WORKING_FRAMES[index % OMP_WORKING_FRAMES.length];
+    return `${fgAnsi(accent)}${spinner}${FG_RESET} ${workingMessage(accent, index)}`;
+  });
+  cachedWorkingFrames = { accent, frames };
+  return frames;
+}
+
 function configureWorkingIndicator(ctx: ExtensionContext): void {
-  const accent = workingAccent(ctx);
-  const frameCount = OMP_WORKING_FRAME_COUNT;
   ctx.ui.setWorkingIndicator({
-    // Pi treats supplied frames as verbatim. Include the message in each frame
-    // so the Loader's own 80 ms animation advances the shimmer reliably rather
-    // than relying on a second timer that can be replaced by core status events.
-    frames: Array.from({ length: frameCount }, (_, index) => {
-      const spinner = OMP_WORKING_FRAMES[index % OMP_WORKING_FRAMES.length];
-      return `${fgAnsi(accent)}${spinner}${FG_RESET} ${workingMessage(ctx, index)}`;
-    }),
+    frames: workingFrames(workingAccent(ctx)),
     intervalMs: 80,
   });
   // omp uses a Unicode ellipsis and an explicit Esc hint instead of pi's
@@ -1022,22 +1034,52 @@ interface RenderableToolPart {
   render(width: number): string[];
 }
 
+interface ToolPartMemo {
+  width: number;
+  childLines: readonly string[][];
+  lines: string[];
+}
+
+// Keyed weakly on the renderer component, so entries die with the transcript.
+const toolPartMemo = new WeakMap<RenderableToolPart, ToolPartMemo>();
+
 /** Render child components separately so pi's bash renderer's padding does not
- * become visible blank rows between omp's command/output sections. */
+ * become visible blank rows between omp's command/output sections.
+ *
+ * This runs for every framed bash block on every rendered frame — that is, on
+ * every keystroke — so the trimming and the concatenation are memoized. The
+ * children cannot be compared by array identity: pi's collapsed bash-output
+ * renderer rebuilds `["", ...cachedLines]` on each call even when it hits its
+ * own cache. Their *contents* are stable, so compare element-wise and reuse the
+ * previous output, which also lets the caller's `sameLines` take its `a === b`
+ * fast path. */
 function renderToolPart(part: RenderableToolPart | undefined, width: number): string[] {
   if (!part) return [];
   const children = (part as RenderableToolPart & { children?: RenderableToolPart[] }).children;
   if (!Array.isArray(children)) return part.render(width);
 
-  const lines: string[] = [];
-  for (const child of children) {
-    const childLines = child.render(width);
-    let first = 0;
-    while (first < childLines.length && isBlankRenderedLine(childLines[first])) first++;
-    let last = childLines.length;
-    while (last > first && isBlankRenderedLine(childLines[last - 1])) last--;
-    lines.push(...childLines.slice(first, last));
+  const childLines = children.map(child => child.render(width));
+  const memo = toolPartMemo.get(part);
+  if (memo && memo.width === width && memo.childLines.length === childLines.length) {
+    let unchanged = true;
+    for (let i = 0; i < childLines.length; i++) {
+      if (!sameLines(memo.childLines[i], childLines[i])) {
+        unchanged = false;
+        break;
+      }
+    }
+    if (unchanged) return memo.lines;
   }
+
+  const lines: string[] = [];
+  for (const rendered of childLines) {
+    let first = 0;
+    while (first < rendered.length && isBlankRenderedLine(rendered[first])) first++;
+    let last = rendered.length;
+    while (last > first && isBlankRenderedLine(rendered[last - 1])) last--;
+    for (let i = first; i < last; i++) lines.push(rendered[i]);
+  }
+  toolPartMemo.set(part, { width, childLines, lines });
   return lines;
 }
 
@@ -1127,6 +1169,7 @@ interface FramedToolMemo {
 }
 
 function sameLines(a: readonly string[], b: readonly string[]): boolean {
+  if (a === b) return true;
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
     if (a[i] !== b[i]) return false;
@@ -1359,6 +1402,11 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     currentCtx = undefined;
     cachedSessionName = undefined;
     cachedSessionNameValid = false;
+    // Release the caches whose entries can be large: the frame set is ~14 KB and
+    // a highlighted command can be far bigger. `sessionAccentCache` is kept — its
+    // entries are tiny and a name must always hash to the same accent.
+    cachedWorkingFrames = undefined;
+    bashHighlightCache.clear();
   });
 }
 
