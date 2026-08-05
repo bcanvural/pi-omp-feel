@@ -1,0 +1,22 @@
+{
+  "name": "pi-omp-feel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Ports oh-my-pi (omp) dark-catppuccin styling and status-line feel to the pi coding agent.",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi-extension", "theme", "omp", "catppuccin", "statusline"],
+  "files": ["src", "themes", "README.md"],
+  "pi": {
+    "extensions": ["./src/index.ts"],
+    "themes": ["./themes"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.83.0",
+    "@earendil-works/pi-tui": ">=0.83.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "@earendil-works/pi-tui": { "optional": true }
+  }
+}
