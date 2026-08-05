@@ -1,4 +1,4 @@
-import { CustomEditor, highlightCode, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, getAgentDir, highlightCode, ToolExecutionComponent, VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -7,13 +7,21 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // omp dark-catppuccin palette (pi's Theme can't express status-line colors,
 // so the bar carries its own hardcoded omp colors — faithful regardless of the
 // active pi theme).
+//
+// Verified against omp's `theme/defaults/dark-catppuccin.json`: statusLineBg =
+// crust, statusLineSep = surface1, statusLineModel = pink, statusLinePath =
+// teal, statusLineGitClean = green, statusLineGitDirty = yellow,
+// statusLineContext = mauve, statusLineCost = maroon. The palette is kept whole
+// even where pi has no equivalent segment (`sky` is omp's statusLineUntracked).
 // ═══════════════════════════════════════════════════════════════════════════
 
 const HEX = {
@@ -162,10 +170,17 @@ const THINKING_COLOR: Record<string, string> = {
 // Small helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-const RESET_SEQ = /[\u001b\u009b][[()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PRZcf-nqry=><]/g;
+// Escape sequences the rendered lines can carry. Matching only CSI left OSC
+// hyperlinks and APC sequences behind — and pi's cursor marker is APC — so both
+// "is this row blank" and the bash wall-time match failed on any line carrying
+// one. pi-tui covers all three families in `extractAnsiCode` but does not
+// export it, so mirror its coverage: CSI, then OSC/APC up to either terminator
+// (BEL or ST).
+const ANSI_SEQ =
+  /[\u001b\u009b][[()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PRZcf-nqry=><]|\u001b[\]_][^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
 
 function stripAnsi(text: string): string {
-  return text.replace(RESET_SEQ, "");
+  return text.replace(ANSI_SEQ, "");
 }
 
 const FLAT_BORDER = /^─+$/;
@@ -265,26 +280,27 @@ function piSegment(): Segment {
   return { content: `${fgAnsi(HEX.peach)}${ICON.pi} ${FG_RESET}`, visible: true };
 }
 
-function modelSegment(ctx: ExtensionContext): Segment {
+/** `<glyph> <model>[ · <thinking>]`, shared by the status segment and the
+ * editor's top-border fallback so the two cannot drift apart. */
+function modelBadgeText(ctx: ExtensionContext): string {
   const model = ctx.model as ({ id?: string; name?: string } | undefined);
   let modelName = model?.name || model?.id || "no-model";
   if (modelName.startsWith("Claude ")) {
     modelName = modelName.slice(7);
   }
 
-  let thinkingDisplay = "";
+  let text = `${ICON.model} ${modelName}`;
   if (ctx.model?.reasoning) {
     const level = ctx.thinkingLevel || "off";
     if (level !== "off") {
-      thinkingDisplay = THINKING_DISPLAY[level] ?? level;
+      text += `${ICON.dot}${THINKING_DISPLAY[level] ?? level}`;
     }
   }
+  return text;
+}
 
-  let content = `${ICON.model} ${modelName}`;
-  if (thinkingDisplay) {
-    content += `${ICON.dot}${thinkingDisplay}`;
-  }
-  return { content: `${fgAnsi(HEX.pink)}${content}${FG_RESET}`, visible: true };
+function modelSegment(ctx: ExtensionContext): Segment {
+  return { content: `${fgAnsi(HEX.pink)}${modelBadgeText(ctx)}${FG_RESET}`, visible: true };
 }
 
 function pathSegment(ctx: ExtensionContext): Segment {
@@ -322,6 +338,10 @@ function contextPercentSegment(ctx: ExtensionContext, contextUsage = ctx.getCont
         : "normal";
   const color =
     level === "error" ? HEX.red : level === "warning" ? HEX.yellow : HEX.mauve;
+  // omp hides this glyph when auto-compaction is off, but pi exposes no accessor
+  // for that setting to extensions (only its RPC `set_auto_compaction` path
+  // touches it), so assume pi's default of enabled. The probe stays so the glyph
+  // starts tracking the real setting for free if pi ever surfaces it.
   const autoCompactEnabled = (ctx as ExtensionContext & { autoCompactionEnabled?: boolean }).autoCompactionEnabled ?? true;
   const autoIcon = autoCompactEnabled ? ` ${ICON.auto}` : "";
 
@@ -337,7 +357,7 @@ function contextPercentSegment(ctx: ExtensionContext, contextUsage = ctx.getCont
   return { content: `${ICON.context} ${fgAnsi(color)}${text}${autoIcon}${FG_RESET}`, visible: true };
 }
 
-function costSegment(ctx: ExtensionContext, usageTotals: UsageTotals): Segment {
+function costSegment(usageTotals: UsageTotals): Segment {
   if (!usageTotals.cost) return { content: "", visible: false };
   return { content: `${fgAnsi(HEX.maroon)}$${usageTotals.cost.toFixed(2)}${FG_RESET}`, visible: true };
 }
@@ -439,7 +459,7 @@ class OmpFooter {
       pathSegment(ctx),
       gitSegment(this.footerData),
       contextPercentSegment(ctx, contextUsage),
-      costSegment(ctx, usageTotals),
+      costSegment(usageTotals),
     ]) {
       if (segment.visible && segment.content) leftParts.push(segment.content);
     }
@@ -518,6 +538,22 @@ class OmpFooter {
 }
 
 const OMP_WORKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const OMP_WORKING_TEXT = "Working…";
+
+/** The shimmer band sweeps the label plus three cells of lead-in and lead-out on
+ * either side, so it repeats every `label + 6` frames (see `workingMessage`). */
+const OMP_SHIMMER_PERIOD = [...OMP_WORKING_TEXT].length + 6;
+
+function leastCommonMultiple(a: number, b: number): number {
+  const greatestCommonDivisor = (x: number, y: number): number => (y === 0 ? x : greatestCommonDivisor(y, x % y));
+  return (a * b) / greatestCommonDivisor(a, b);
+}
+
+// Pi cycles the supplied frames verbatim, so the list has to span a whole number
+// of both the spinner and the shimmer cycle. A shorter list wraps one of them
+// mid-cycle: at 16 frames the 10-glyph spinner jumped five positions on every
+// wrap, roughly once a second.
+const OMP_WORKING_FRAME_COUNT = leastCommonMultiple(OMP_WORKING_FRAMES.length, OMP_SHIMMER_PERIOD);
 
 function workingAccent(ctx: ExtensionContext): string {
   const sessionName = currentSessionName(ctx);
@@ -526,9 +562,8 @@ function workingAccent(ctx: ExtensionContext): string {
 
 function workingMessage(ctx: ExtensionContext, frame: number): string {
   const accent = workingAccent(ctx);
-  const text = "Working…";
-  const center = (frame % (text.length + 6)) - 3;
-  const shimmer = [...text]
+  const center = (frame % OMP_SHIMMER_PERIOD) - 3;
+  const shimmer = [...OMP_WORKING_TEXT]
     .map((character, index) => {
       const distance = Math.abs(index - center);
       const color = distance <= 2 ? accent : HEX.overlay0;
@@ -542,7 +577,7 @@ function workingMessage(ctx: ExtensionContext, frame: number): string {
 
 function configureWorkingIndicator(ctx: ExtensionContext): void {
   const accent = workingAccent(ctx);
-  const frameCount = OMP_WORKING_FRAMES.length + 6;
+  const frameCount = OMP_WORKING_FRAME_COUNT;
   ctx.ui.setWorkingIndicator({
     // Pi treats supplied frames as verbatim. Include the message in each frame
     // so the Loader's own 80 ms animation advances the shimmer reliably rather
@@ -559,6 +594,132 @@ function configureWorkingIndicator(ctx: ExtensionContext): void {
   // The frame itself carries the message; clear Pi's separate message slot so
   // it does not append the default static "Working..." text.
   ctx.ui.setWorkingMessage?.("");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Degrading instead of crashing
+//
+// The two sections below reach past pi's public surface: the editor depends on
+// the shape of the stock Editor's rendered rows, and the tool-frame patch
+// replaces a method on a shared prototype and reads its private fields. Neither
+// has a supported alternative — pi's TUI has no top-border provider, and
+// `renderShell`/`renderCall`/`renderResult` only apply to tools an extension
+// registers itself. Both also run on every frame, so an internal change in pi
+// would otherwise throw ~60 times a second and take the whole TUI down with it.
+// Instead: fail once, say so in the footer, and hand rendering back to pi for
+// the rest of the session.
+// ═══════════════════════════════════════════════════════════════════════════
+
+let toolFramingDisabled = false;
+let editorReshapeDisabled = false;
+
+type DegradedSubsystem = "tool-framing" | "prompt-framing";
+
+const DEGRADED_LABEL: Record<DegradedSubsystem, string> = {
+  "tool-framing": "tool-call framing",
+  "prompt-framing": "prompt framing",
+};
+
+// What each subsystem assumes about pi's internals. A failure means one of these
+// stopped holding, so listing them in the report turns "something threw" into a
+// checklist someone (or an agent) can work through against the installed pi.
+const DEGRADED_ASSUMPTIONS: Record<DegradedSubsystem, string[]> = {
+  "tool-framing": [
+    "`ToolExecutionComponent.prototype.render` can be patched, because the extension loader resolves `@earendil-works/pi-coding-agent` to the same module instance pi core imports.",
+    "Instance members read: `hideComponent`, `hasRendererDefinition()`, `getRenderShell()`, `contentBox.render()`, `contentBox.bgFn()`, `contentText.render()`, `callRendererComponent`, `resultRendererComponent`, `args`, `imageComponents`, `imageSpacers`, `isPartial`, `executionStarted`, `result.isError`, `toolName`.",
+    "`contentBox` is a pi-tui `Box` with paddingX 1, so it renders children at `width - 2`. The bash path therefore skips it entirely (rendering those same children only at `width - 4`) and takes the background tint from `contentBox.bgFn(\"\")` instead — rendering both would thrash the children's single-width caches.",
+    "Rows from a background-tinted `Box` start with an SGR background sequence and end with `ESC[49m` (see `addSideBorders`).",
+    "`theme.bg()` returns `<bg-ansi><text>ESC[49m`, so an empty probe yields the same background prefix as a rendered row.",
+  ],
+  "prompt-framing": [
+    "The stock pi `Editor` draws its top and bottom border as rows containing only `─` (see `isFlatBorderLine`).",
+    "A scrolled prompt replaces the top border with a `↑` scroll row, which must not match the flat-border test.",
+    "With paddingX 2, every content row comes back padded to exactly `innerWidth` with two leading and two trailing spaces — the rail and bottom-corner fast paths skip truncation on that basis.",
+    "Autocomplete rows are emitted after the bottom border row and keep the stock layout.",
+    "`super.render()` returns a freshly allocated array that is safe to mutate in place.",
+  ],
+};
+
+const DEGRADED_REPORT_NAME = "pi-omp-feel-degraded.md";
+const DEGRADED_REPORT_MAX_BYTES = 256_000;
+
+/** Capture a diagnostic value without ever throwing — these run inside `catch`
+ * blocks, where a second throw would escape the guard entirely. */
+function safeProbe(probe: () => string): string {
+  try {
+    return probe();
+  } catch (error) {
+    return `<probe failed: ${error instanceof Error ? error.message : String(error)}>`;
+  }
+}
+
+function extensionSourcePath(): string {
+  try {
+    return fileURLToPath(import.meta.url);
+  } catch {
+    return "unknown (extension loaded from a virtual module)";
+  }
+}
+
+/** Record a degraded subsystem in full, and point the footer at the report.
+ *
+ * The footer line is sanitized to one row and truncated to the terminal width,
+ * so it can only ever carry a pointer. Everything a fix needs — stack trace, pi
+ * version, the assumptions that broke — goes to a file that can be handed to an
+ * agent verbatim (in pi: `@<path>`). */
+function reportDegraded(subsystem: DegradedSubsystem, error: unknown, context: Record<string, unknown> = {}): void {
+  const label = DEGRADED_LABEL[subsystem];
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  const detail = error instanceof Error ? (error.stack ?? message) : message;
+  const reportPath = join(getAgentDir(), DEGRADED_REPORT_NAME);
+
+  let wrote = false;
+  let writeFailure: string | undefined;
+  try {
+    const entry = [
+      `## pi-omp-feel: ${label} disabled`,
+      "",
+      "This extension deliberately reaches past pi's public API (see the README).",
+      "It disabled the subsystem below after one of the listed assumptions stopped",
+      "holding, and handed rendering back to pi for the rest of the session.",
+      "Paste this whole entry into an agent to get it fixed.",
+      "",
+      `- when: ${new Date().toISOString()}`,
+      `- subsystem: \`${subsystem}\``,
+      `- pi version: \`${PI_VERSION}\``,
+      `- extension source: \`${extensionSourcePath()}\``,
+      `- node: \`${process.version}\` on \`${process.platform}/${process.arch}\``,
+      ...Object.entries(context).map(([key, value]) => `- ${key}: \`${String(value)}\``),
+      "",
+      "### Assumptions this subsystem depends on",
+      "",
+      ...DEGRADED_ASSUMPTIONS[subsystem].map(assumption => `- ${assumption}`),
+      "",
+      "### Error",
+      "",
+      "```",
+      detail,
+      "```",
+      "",
+      "---",
+      "",
+      "",
+    ].join("\n");
+
+    mkdirSync(getAgentDir(), { recursive: true });
+    const keepExisting = existsSync(reportPath) && statSync(reportPath).size < DEGRADED_REPORT_MAX_BYTES;
+    writeFileSync(reportPath, (keepExisting ? readFileSync(reportPath, "utf8") : "") + entry);
+    wrote = true;
+  } catch (writeError) {
+    // Reporting must never mask the failure it is reporting, and never write to
+    // stdout/stderr — that corrupts the TUI. Fall back to the footer.
+    writeFailure = writeError instanceof Error ? writeError.message : String(writeError);
+  }
+
+  const pointer = wrote
+    ? `see ${shortenPath(reportPath)}`
+    : `report unwritable (${sanitizeStatusText(writeFailure ?? "unknown")}) — ${sanitizeStatusText(message)}`;
+  currentCtx?.ui.setStatus(`omp-feel-${subsystem}`, `omp-feel: ${label} disabled — ${pointer}`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -625,15 +786,7 @@ class OmpEditor extends CustomEditor {
 
     const ctx = this.getCtx();
     if (!ctx?.model) return undefined;
-    const model = ctx.model as { id?: string; name?: string };
-    let name = model.name || model.id || "no-model";
-    if (name.startsWith("Claude ")) name = name.slice(7);
-    let text = `${ICON.model} ${name}`;
-    if (ctx.model.reasoning) {
-      const level = ctx.thinkingLevel || "off";
-      if (level !== "off") text += ` · ${THINKING_DISPLAY[level] ?? level}`;
-    }
-    return `${fgAnsi(HEX.pink)}${text}${FG_RESET}`;
+    return `${fgAnsi(HEX.pink)}${modelBadgeText(ctx)}${FG_RESET}`;
   }
 
   private topBorderMemo?: { width: number; status: string; borderState: string; line: string };
@@ -667,7 +820,26 @@ class OmpEditor extends CustomEditor {
   }
 
   override render(width: number): string[] {
-    if (width < 4) return super.render(width);
+    if (editorReshapeDisabled || width < 4) return super.render(width);
+    try {
+      return this.renderOmpFrame(width);
+    } catch (error) {
+      editorReshapeDisabled = true;
+      reportDegraded("prompt-framing", error, {
+        width,
+        // What the stock editor actually returned, stripped of colour: the fastest
+        // way to see which layout assumption no longer matches.
+        "stock rows": safeProbe(() =>
+          JSON.stringify(super.render(Math.max(2, width - 2)).map(line => stripAnsi(line)))),
+      });
+      return super.render(width);
+    }
+  }
+
+  /** Reshape the stock editor's rows into omp's rounded frame. Assumes the stock
+   * layout (flat `─` border rows, two-cell padding); `render` above catches the
+   * fallout if that ever stops holding. */
+  private renderOmpFrame(width: number): string[] {
     this.updateBorderColor();
     const innerWidth = Math.max(2, width - 2);
     const lines = super.render(innerWidth);
@@ -774,7 +946,7 @@ function extractBgAnsi(line: string): string {
 }
 
 /** Wrap a bg-tinted box row with `│` side borders (bg preserved, border-colored). */
-function addSideBorders(line: string, width: number, borderColor: string): string {
+function addSideBorders(line: string, borderColor: string): string {
   const m = line.startsWith("\x1b[48;2;")
     ? line.match(/^(\x1b\[48;2;\d+;\d+;\d+m)([\s\S]*?)(\x1b\[49m)$/)
     : line.startsWith("\x1b[48;5;")
@@ -969,7 +1141,7 @@ function patchToolCallFraming(): void {
 
   const originalRender = proto.render;
   const frameMemo = new WeakMap<FramedToolComponent, FramedToolMemo>();
-  proto.render = function (this: FramedToolComponent, width: number): string[] {
+  const framedRender = function (this: FramedToolComponent, width: number): string[] {
     if (this.hideComponent) return [];
     if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
       return originalRender.call(this, width);
@@ -1069,7 +1241,7 @@ function patchToolCallFraming(): void {
     } else {
       lines.push(buildFrameBar(width, "top", header, borderColor, barBg));
       for (const line of rawCall) {
-        lines.push(addSideBorders(line, width, borderColor));
+        lines.push(addSideBorders(line, borderColor));
       }
     }
     for (let i = 0; i < this.imageComponents.length; i++) {
@@ -1084,12 +1256,32 @@ function patchToolCallFraming(): void {
     lines.unshift("");
     frameMemo.set(this, { width, stateKey, rawCall, rawResult, imageKey: this.imageComponents, lines });
     return lines;
+  };
+
+  proto.render = function (this: FramedToolComponent, width: number): string[] {
+    if (toolFramingDisabled) return originalRender.call(this, width);
+    try {
+      return framedRender.call(this, width);
+    } catch (error) {
+      toolFramingDisabled = true;
+      reportDegraded("tool-framing", error, {
+        width,
+        toolName: safeProbe(() => String(this.toolName)),
+        renderShell: safeProbe(() => `${this.hasRendererDefinition()}/${this.getRenderShell()}`),
+        state: safeProbe(() => `partial=${this.isPartial} started=${this.executionStarted} error=${this.result?.isError}`),
+        // Which of the fields the patch depends on are actually present.
+        "members present": safeProbe(() =>
+          (["contentBox", "contentText", "callRendererComponent", "resultRendererComponent", "imageComponents", "imageSpacers", "args"] as const)
+            .map(name => `${name}=${this[name] === undefined ? "missing" : "ok"}`)
+            .join(" ")),
+      });
+      return originalRender.call(this, width);
+    }
   } as typeof proto.render;
 }
 
 export default function ompFeelExtension(pi: ExtensionAPI) {
   patchToolCallFraming();
-  let currentCtx: ExtensionContext | undefined;
 
   pi.on("session_start", (_event, ctx) => {
     currentCtx = ctx;
@@ -1170,6 +1362,10 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   });
 }
 
+// Module-level because the tool-frame patch runs on a shared prototype with no
+// access to a session context, and `reportDegraded` needs one to reach the
+// footer. The extension already assumes a single session per process.
+let currentCtx: ExtensionContext | undefined;
 let activeTui: TUI | undefined;
 let activeEditor: OmpEditor | undefined;
 let activeFooter: OmpFooter | undefined;
