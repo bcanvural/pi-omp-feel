@@ -158,7 +158,12 @@ export type GlyphPreset = "nerd" | "unicode";
 
 interface GlyphSet {
   /** omp `tool.*`. A tool with no entry here is one omp renders as a single row
-   * rather than a block, which is what `framed` keys off. */
+   * rather than a block, which is what `framed` keys off.
+   *
+   * Tools from other extensions are named here too when they earn an identity —
+   * `write_stdin` borrows the `ssh` glyph because both are the same idea, a
+   * stream written to something already running, and the two never appear in
+   * one transcript. */
   tool: Record<string, string>;
   status: { pending: string; running: string; error: string; bullet: string };
   thinking: Record<string, string>;
@@ -166,8 +171,10 @@ interface GlyphSet {
 
 const GLYPH_PRESETS: Record<GlyphPreset, GlyphSet> = {
   nerd: {
-    tool: { bash: "\uebca", write: "\uea7f", edit: "\uea73", ssh: "\ueb3a", mcp: "\ueb2d" },
-    status: { pending: "\uf254", running: "\uf110", error: "\uf00d", bullet: "\u2022" },
+    tool: { bash: "\uebca", write: "\uea7f", edit: "\uea73", ssh: "\ueb3a", mcp: "\ueb2d", write_stdin: "\ueb3a" },
+    // The bullet is a filled circle in the nerd preset, not the typographic
+    // one \u2014 captured from omp's own `\u25cf Read` rows.
+    status: { pending: "\uf254", running: "\uf110", error: "\uf00d", bullet: "\uf111" },
     thinking: {
       minimal: "\u{f0a9e} min",
       low: "\u{f0a9f} low",
@@ -178,7 +185,7 @@ const GLYPH_PRESETS: Record<GlyphPreset, GlyphSet> = {
     },
   },
   unicode: {
-    tool: { bash: "\u276f", write: "\u270e", edit: "\u270e", ssh: "\u21c4", mcp: "\u{1f50c}" },
+    tool: { bash: "\u276f", write: "\u270e", edit: "\u270e", ssh: "\u21c4", mcp: "\u{1f50c}", write_stdin: "\u21c4" },
     status: { pending: "\u23f3", running: "\u27f3", error: "\u2718", bullet: "\u2022" },
     thinking: {
       minimal: "\u25cb min",
@@ -767,8 +774,9 @@ const DEGRADED_LABEL: Record<DegradedSubsystem, string> = {
 const DEGRADED_ASSUMPTIONS: Record<DegradedSubsystem, string[]> = {
   "tool-framing": [
     "`ToolExecutionComponent.prototype.render` can be patched, because the extension loader resolves `@earendil-works/pi-coding-agent` to the same module instance pi core imports.",
-    "Instance members read: `hideComponent`, `hasRendererDefinition()`, `getRenderShell()`, `contentBox.render()`, `contentBox.bgFn()`, `contentText.render()`, `callRendererComponent`, `resultRendererComponent`, `args`, `imageComponents`, `imageSpacers`, `isPartial`, `executionStarted`, `result.isError`, `toolName`.",
-    "`contentBox` is a pi-tui `Box` with paddingX 1, so it renders children at `width - 2`. The bash path therefore skips it entirely (rendering those same children only at `width - 4`) and takes the background tint from `contentBox.bgFn(\"\")` instead — rendering both would thrash the children's single-width caches.",
+    "Instance members read: `hideComponent`, `hasRendererDefinition()`, `getRenderShell()`, `contentBox.render()`, `contentBox.bgFn()`, `contentText.render()`, `selfRenderContainer.render()`, `callRendererComponent`, `resultRendererComponent`, `args`, `imageComponents`, `imageSpacers`, `isPartial`, `executionStarted`, `result.isError`, `toolName`.",
+    "`edit` declares `renderShell: \"self\"` and builds its own shell as a background-tinted `Box`, so `selfRenderContainer` yields rows this can frame (see `frameSelfRendered`). Its diff rows are `+123 `/`-123 `/` 123 `-prefixed, which is what the `⟨+N/-M⟩` badge counts.",
+    "`contentBox` is a pi-tui `Box` with paddingX 1, so it renders children at `width - 2`. The section path (see `TOOL_PROFILES`) therefore skips it entirely (rendering those same children only at `width - 4`) and takes the background tint from `contentBox.bgFn(\"\")` instead — rendering both would thrash the children's single-width caches.",
     "Rows from a background-tinted `Box` start with an SGR background sequence and end with `ESC[49m` (see `addSideBorders`).",
     "`theme.bg()` returns `<bg-ansi><text>ESC[49m`, so an empty probe yields the same background prefix as a rendered row.",
   ],
@@ -1108,6 +1116,16 @@ function addSideBorders(line: string, borderColor: string): string {
   return `${bgPrefix}${border}${inner}${border}${bgReset}`;
 }
 
+/** Border one body row. `addSideBorders` needs a background-tinted row and
+ * hands anything else back unchanged; a self-rendered tool can produce a bare
+ * `Text` row alongside its tinted ones — pi's `edit` does exactly that for an
+ * error — and an unbordered row in the middle of a frame reads as a hole. Those
+ * have no tint to preserve, so pad and border them directly. */
+function frameBodyRow(line: string, width: number, borderColor: string, barBg: string): string {
+  const bordered = addSideBorders(line, borderColor);
+  return bordered === line ? renderFrameContentRow(line, width, borderColor, barBg) : bordered;
+}
+
 /** omp-style `╭─── <header> ────╮` / `╰────────╯` bar, tinted with the block bg. */
 function buildFrameBar(width: number, kind: "top" | "bottom", header: string, borderColor: string, barBg: string): string {
   const border = (text: string): string => `${fgAnsi(borderColor)}${text}${FG_RESET}`;
@@ -1164,6 +1182,155 @@ function isBlankRenderedLine(line: string): boolean {
   return stripAnsi(line).trim().length === 0;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Tool profiles
+//
+// omp's transcript has three shapes: a headerless block that leads with the
+// command (bash), a block with a `glyph Title` header, and a single row. pi's
+// own tools map onto them by name, but so must tools that arrive from another
+// extension — `pi-runbg`'s `exec_command` is a shell command in every respect
+// except that nothing in pi says so.
+//
+// A profile is where a tool declares which shape it takes. Tools without one
+// still land somewhere sensible (a titled block, or a single row when there is
+// only one), so this table is for tools that deserve better than the default,
+// not a registry every tool has to appear in. The extensions being described do
+// not know this file exists, and should not have to.
+// ───────────────────────────────────────────────────────────────────────────
+
+type ToolArgs = Record<string, unknown>;
+
+/** A rendered row beside its stripped text, so profiles can match on the text
+ * without every one of them re-stripping the same rows. */
+interface StrippedRow {
+  line: string;
+  plain: string;
+}
+
+interface ToolProfile {
+  /** Lead with the command instead of a header, as omp's bash block does. */
+  headerless?: boolean;
+  /** Header label, when the derived one is wrong. */
+  title?: string;
+  /** Frame this tool even though it declares `renderShell: "self"`.
+   *
+   * Opt-in per tool, never blanket: a tool that draws its own shell may already
+   * be drawing a frame, and wrapping that in a second one is worse than leaving
+   * it alone. pi's `edit` is the one built-in that qualifies — what it calls a
+   * shell is a background-tinted `Box`, the same shape every other block here
+   * is built from. */
+  frameSelfRendered?: boolean;
+  /** Suffix for the framed header — omp's `· 4 lines` on a write, `⟨+1/-1⟩` on
+   * an edit. Returns its own colouring, because omp does not use one colour for
+   * all of it. `body` is the block's own rows, stripped, and is only computed if
+   * a profile actually asks for it. */
+  summary?(args: ToolArgs, body: () => readonly StrippedRow[]): string | undefined;
+  /** Draw the call and the result as omp's two sections divided by `Output`,
+   * rather than one padded box. Needs both renderer components, so it is
+   * ignored for a tool that has none (see `sections` in the patch). */
+  sections?: boolean;
+  /** The shell command behind this call, so the call row can be re-rendered in
+   * omp's dim-`$`, syntax-highlighted style instead of however the tool wrote
+   * it. */
+  command?(args: ToolArgs): string | undefined;
+  /** Call-side detail for the dim `(a · b)` suffix that follows a command.
+   * Built from `args` rather than parsed back out of the row being replaced, so
+   * rewriting the row cannot silently drop something the tool wanted shown. */
+  detail?(args: ToolArgs): (string | false | undefined)[];
+  /** Rewrite whichever result rows carry timing into omp's `⟨Wall: …⟩` badge.
+   * Only consulted on the section layout, where call and result rows are kept
+   * apart and a result row can be identified as one. */
+  wall?(rows: readonly StrippedRow[], args: ToolArgs): readonly string[];
+}
+
+/** A `Map`, not an object literal: tool names come from whatever extensions are
+ * installed, and `TOOL_PROFILES["constructor"]` would otherwise find something. */
+const TOOL_PROFILES = new Map<string, ToolProfile>([
+  [
+    "bash",
+    {
+      headerless: true,
+      sections: true,
+      command: args => (typeof args.command === "string" ? args.command : undefined),
+      wall: bashWall,
+    },
+  ],
+  // pi-runbg. `exec_command` is a shell command that happens to survive the
+  // call, so it gets exactly what omp gives bash — no header, the command
+  // first, output below a divider. What omp has no vocabulary for (the session
+  // it leaves behind, the log it writes) stays in runbg's own status row.
+  [
+    "exec_command",
+    {
+      headerless: true,
+      sections: true,
+      command: args => (typeof args.cmd === "string" ? args.cmd : undefined),
+      detail: args => [
+        // The session cwd is already in the status bar and omp does not repeat
+        // it on a bash block, so name a directory only when this call overrode it.
+        typeof args.workdir === "string" && args.workdir.length > 0 && `cwd: ${shortenPath(args.workdir)}`,
+        args.tty === true && "tty",
+        args.on_exit === "wake" && "wake",
+      ],
+      wall: runbgWall,
+    },
+  ],
+  // Keystrokes into a live session are not a command, so this one keeps a
+  // header — but its output is still output, and belongs under a divider.
+  ["write_stdin", { sections: true, wall: runbgWall }],
+  ["write", { summary: writeLineSummary }],
+  ["edit", { frameSelfRendered: true, summary: editDiffSummary }],
+]);
+
+/** omp closes a write header with `· 4 lines`, counting the file it wrote — the
+ * trailing newline included, which is why a three-line file reads as four and
+ * renders an empty fourth row. Splitting the content gives exactly that. */
+function writeLineSummary(args: ToolArgs): string | undefined {
+  if (typeof args.content !== "string") return undefined;
+  const lines = args.content.split("\n").length;
+  return `${fgAnsi(HEX_TOOL.dim)}· ${lines} ${lines === 1 ? "line" : "lines"}${FG_RESET}`;
+}
+
+/** pi's diff rows are `+123 content` / `-123 content` / ` 123 content`, so the
+ * counts omp puts in its `⟨+1/-1⟩` badge can be read off the rows themselves.
+ *
+ * Counting the rendered rows rather than `result.details.diff` is deliberate:
+ * pi renders a live preview of the diff before any result exists, and omp
+ * badges that preview too. The cost is that a wrapped continuation row could in
+ * principle start like a diff marker and be miscounted — a wrong number in a
+ * badge, which is the cheapest thing here to be wrong about. */
+const DIFF_ROW_PATTERN = /^([+-])\s*\d*\s/;
+
+function editDiffSummary(_args: ToolArgs, body: () => readonly StrippedRow[]): string | undefined {
+  let added = 0;
+  let removed = 0;
+  for (const row of body()) {
+    const marker = DIFF_ROW_PATTERN.exec(row.plain);
+    if (marker) {
+      if (marker[1] === "+") added++;
+      else removed++;
+    }
+  }
+  if (added + removed === 0) return undefined;
+  // Captured from omp: the brackets and the slash are dim, the counts carry the
+  // colour of what they are.
+  const dim = fgAnsi(HEX_TOOL.dim);
+  return `${dim}⟨${fgAnsi(HEX.green)}+${added}${dim}/${fgAnsi(HEX.red)}-${removed}${dim}⟩${FG_RESET}`;
+}
+
+/** `exec_command` → `Exec command`. A tool from another extension is under no
+ * obligation to have a one-word name, and omp titles its blocks in prose. */
+function toolTitle(toolName: string): string {
+  const override = TOOL_PROFILES.get(toolName)?.title;
+  if (override !== undefined) return override;
+  const spaced = toolName.replace(/[_-]+/g, " ");
+  return `${spaced.charAt(0).toUpperCase()}${spaced.slice(1)}`;
+}
+
+function asToolArgs(args: unknown): ToolArgs {
+  return typeof args === "object" && args !== null ? (args as ToolArgs) : {};
+}
+
 /** Split pi's `<tool> <target>` call row into its two halves, so both the
  * one-line rows and the framed headers can name what the tool acted on without
  * per-tool knowledge of where the target lives in `args`. Returns no target
@@ -1172,7 +1339,7 @@ function splitToolCallRow(contentLine: string, toolName: string): { title: strin
   const plain = sanitizeStatusText(stripAnsi(contentLine));
   const split = plain.indexOf(" ");
   const label = split === -1 ? plain : plain.slice(0, split);
-  const title = `${toolName.charAt(0).toUpperCase()}${toolName.slice(1)}`;
+  const title = toolTitle(toolName);
   if (label.toLowerCase() !== toolName.toLowerCase()) return { title, target: "" };
   return { title, target: split === -1 ? "" : plain.slice(split + 1) };
 }
@@ -1255,18 +1422,40 @@ function highlightBashCommand(command: string): string[] {
   return highlighted;
 }
 
-/** Re-render pi's bold bash call in omp's dim-prefix/syntax-highlighted style. */
-function renderBashCallLines(rawLines: readonly string[], args: unknown): string[] {
-  const command =
-    args && typeof args === "object" && typeof (args as { command?: unknown }).command === "string"
-      ? (args as { command: string }).command.replace(/\t/g, "   ")
-      : "";
-  if (!command) return [...rawLines];
+/** Re-render a bold, plainly-printed command call in omp's dim-prefix,
+ * syntax-highlighted style. A tool that does not say where its command lives
+ * keeps whatever rows it drew. */
+function renderCommandLines(
+  rawLines: readonly string[],
+  profile: ToolProfile | undefined,
+  args: unknown,
+): readonly string[] {
+  const toolArgs = asToolArgs(args);
+  const command = profile?.command?.(toolArgs)?.replace(/\t/g, "   ") ?? "";
+  if (!command) return rawLines;
 
   const highlighted = highlightBashCommand(command);
-  if (highlighted.length === 0) return [...rawLines];
+  if (highlighted.length === 0) return rawLines;
   const prefix = `${fgAnsi(HEX.overlay0)}$ ${FG_RESET}`;
-  return highlighted.map((line, index) => (index === 0 ? `${prefix}${line}` : line));
+  const lines = highlighted.map((line, index) => (index === 0 ? `${prefix}${line}` : line));
+
+  const detail = (profile?.detail?.(toolArgs) ?? []).filter(
+    (part): part is string => typeof part === "string" && part.length > 0,
+  );
+  if (detail.length > 0) {
+    lines[lines.length - 1] += `${fgAnsi(HEX.overlay0)} (${detail.join(" · ")})${FG_RESET}`;
+  }
+  return lines;
+}
+
+/** Strip each row once. Profiles walk the rows more than once, and stripping is
+ * the only expensive step in doing so. */
+function stripRows(rawLines: readonly string[]): StrippedRow[] {
+  return rawLines.map(line => ({ line, plain: stripAnsi(line).trim() }));
+}
+
+function wallBadge(text: string, tail = ""): string {
+  return `${fgAnsi(HEX.overlay0)}⟨${text}⟩${tail}${FG_RESET}`;
 }
 
 const BASH_TOOK_PATTERN = /^Took\s+(.+)$/;
@@ -1279,20 +1468,13 @@ const BASH_EXIT_PATTERN = /^Command exited with code (\d+)$/;
  * Exit: 2⟩` — where pi devotes a whole row to it, preceded by blank rows. Fold
  * it the same way, but only when there is a badge to fold it into, so the status
  * can never be dropped if pi changes how it reports one. */
-function renderBashResultLines(rawLines: readonly string[], args: unknown): string[] {
-  const timeout =
-    args && typeof args === "object" && typeof (args as { timeout?: unknown }).timeout === "number"
-      ? (args as { timeout: number }).timeout
-      : undefined;
-  const timeoutText = timeout !== undefined && Number.isFinite(timeout) ? ` | Timeout: ${timeout}s` : "";
-
-  // Strip each row once: this walks the rows three times, and stripping is the
-  // only expensive step in it.
-  const rows = rawLines.map(line => ({ line, plain: stripAnsi(line).trim() }));
+function bashWall(rows: readonly StrippedRow[], args: ToolArgs): readonly string[] {
+  const timeout = typeof args.timeout === "number" && Number.isFinite(args.timeout) ? args.timeout : undefined;
+  const timeoutText = timeout === undefined ? "" : ` | Timeout: ${timeout}s`;
   const canFoldExit = rows.some(row => BASH_TOOK_PATTERN.test(row.plain));
 
   let exitCode: string | undefined;
-  const kept: typeof rows = [];
+  const kept: StrippedRow[] = [];
   for (const row of rows) {
     const exit = canFoldExit ? BASH_EXIT_PATTERN.exec(row.plain) : null;
     if (exit) {
@@ -1309,8 +1491,46 @@ function renderBashResultLines(rawLines: readonly string[], args: unknown): stri
     const took = BASH_TOOK_PATTERN.exec(plain);
     if (!took) return line;
     const exitText = exitCode === undefined ? "" : ` | Exit: ${exitCode}`;
-    return `${fgAnsi(HEX.overlay0)}⟨Wall: ${took[1]}${timeoutText}${exitText}⟩${FG_RESET}`;
+    return wallBadge(`Wall: ${took[1]}${timeoutText}${exitText}`);
   });
+}
+
+const RUNBG_TIMING_PATTERN = /^(?:took|yielded|elapsed)\s+(\S+)$/;
+const RUNBG_EXIT_PATTERN = /^exit_code=(-?\d+)$/;
+
+/** pi-runbg closes a block with one dim `took 0.2s · exit_code=0 ·
+ * session_id=3 · log: …` row. Lift the two parts omp has a name for into its
+ * badge and leave the rest alongside it: a session id and a log path have no
+ * omp equivalent, and on a backgrounded command they are the point.
+ *
+ * Only the last non-blank row is considered, so a line of program output that
+ * happens to begin `took …` is never mistaken for the status row. If runbg ever
+ * rewords it the match simply fails and its own row shows through. */
+function runbgWall(rows: readonly StrippedRow[], args: ToolArgs): readonly string[] {
+  let last = rows.length - 1;
+  while (last >= 0 && rows[last].plain.length === 0) last--;
+  if (last < 0) return rows.map(row => row.line);
+
+  const bits = rows[last].plain.split(" · ");
+  const timing = RUNBG_TIMING_PATTERN.exec(bits[0] ?? "");
+  if (!timing) return rows.map(row => row.line);
+
+  // omp puts the ceiling on a run beside its wall time; runbg's ceiling is the
+  // window this call stayed attached for.
+  const badge = [`Wall: ${timing[1]}`];
+  const yieldMs = args.yield_time_ms;
+  if (typeof yieldMs === "number" && Number.isFinite(yieldMs)) badge.push(`Yield: ${yieldMs / 1000}s`);
+
+  const rest: string[] = [];
+  for (const bit of bits.slice(1)) {
+    const exit = RUNBG_EXIT_PATTERN.exec(bit);
+    if (exit) badge.push(`Exit: ${exit[1]}`);
+    else rest.push(bit);
+  }
+
+  const tail = rest.length > 0 ? ` ${rest.join(" · ")}` : "";
+  const replaced = wallBadge(badge.join(" | "), tail);
+  return rows.map((row, index) => (index === last ? replaced : row.line));
 }
 
 /** Structural view of the patched component (the compiled class fields are public). */
@@ -1323,6 +1543,8 @@ interface FramedToolComponent {
   // runtime; Box itself samples it to validate its own cache.
   contentBox: { render(width: number): string[]; bgFn?: (text: string) => string };
   contentText: { render(width: number): string[] };
+  /** Where pi puts the tool's own component when `renderShell` is `"self"`. */
+  selfRenderContainer: { render(width: number): string[] };
   args?: unknown;
   callRendererComponent?: RenderableToolPart;
   resultRendererComponent?: RenderableToolPart;
@@ -1372,17 +1594,24 @@ function patchToolCallFraming(): void {
   const frameMemo = new WeakMap<FramedToolComponent, FramedToolMemo>();
   const framedRender = function (this: FramedToolComponent, width: number): string[] {
     if (this.hideComponent) return [];
-    if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
+
+    const profile = TOOL_PROFILES.get(this.toolName);
+    // A tool that draws its own shell keeps it, unless its profile says the
+    // shell is one we can frame.
+    const selfRendered = this.hasRendererDefinition() && this.getRenderShell() === "self";
+    if (selfRendered && profile?.frameSelfRendered !== true) {
       return originalRender.call(this, width);
     }
 
-    const isBash = this.toolName === "bash" && this.callRendererComponent !== undefined;
+    // The call renderer is what the section layout draws; a transcript replayed
+    // after its extension was uninstalled has none, and falls back to the box.
+    const sections = profile?.sections === true && this.callRendererComponent !== undefined;
 
     // Raw, reference-stable inputs. When nothing changed, pi's component
     // caches hand back identical line arrays, so the memo below skips all
     // framing work and returns the previous output array.
     //
-    // The bash branch deliberately does not render `contentBox`. Its children
+    // The section branch deliberately does not render `contentBox`. Its children
     // are the very same call/result components framed below at `width - 4`, and
     // their caches key on a single width — rendering the box at `width` too
     // makes the two calls invalidate each other, so every frame re-wraps the
@@ -1391,16 +1620,18 @@ function patchToolCallFraming(): void {
     let boxLines: string[] | undefined;
     let rawCall: readonly string[];
     let rawResult: readonly string[];
-    if (isBash) {
+    if (sections) {
       const innerWidth = Math.max(1, width - 4);
       rawCall = renderToolPart(this.callRendererComponent, innerWidth);
       rawResult = this.resultRendererComponent
         ? renderToolPart(this.resultRendererComponent, innerWidth)
         : [];
     } else {
-      boxLines = this.hasRendererDefinition()
-        ? this.contentBox.render(width)
-        : this.contentText.render(width);
+      boxLines = selfRendered
+        ? this.selfRenderContainer.render(width)
+        : this.hasRendererDefinition()
+          ? this.contentBox.render(width)
+          : this.contentText.render(width);
       rawCall = boxLines;
       rawResult = [];
     }
@@ -1451,7 +1682,7 @@ function patchToolCallFraming(): void {
       iconColor = HEX_TOOL.accent;
     }
 
-    const header = `${fgAnsi(iconColor)}${icon}${FG_RESET} ${fgAnsi(HEX_TOOL.accent)}${this.toolName}${FG_RESET}`;
+    const header = `${fgAnsi(iconColor)}${icon}${FG_RESET} ${fgAnsi(HEX_TOOL.accent)}${toolTitle(this.toolName)}${FG_RESET}`;
     // `theme.bg()` returns `<bg-ansi><text>\x1b[49m`, so an empty probe carries
     // the same background prefix a rendered box row would.
     const barBg = boxLines
@@ -1460,14 +1691,17 @@ function patchToolCallFraming(): void {
 
     const lines: string[] = [];
     let framed = true;
-    if (isBash) {
+    if (sections) {
       // omp's bash renderer intentionally has no tool-title header. Its command
       // is the first section, followed by a labeled Output divider once a
       // result exists. Render pi's call/result components independently to
-      // remove the Box's vertical padding and preserve that structure.
-      const callLines = renderBashCallLines(rawCall, this.args);
-      const resultLines = renderBashResultLines(rawResult, this.args);
-      lines.push(buildFrameBar(width, "top", "", borderColor, barBg));
+      // remove the Box's vertical padding and preserve that structure. A tool
+      // that leads with something other than a command keeps its header.
+      const callLines = renderCommandLines(rawCall, profile, this.args);
+      const resultLines = profile?.wall
+        ? profile.wall(stripRows(rawResult), asToolArgs(this.args))
+        : rawResult;
+      lines.push(buildFrameBar(width, "top", profile?.headerless ? "" : header, borderColor, barBg));
       for (const line of callLines) {
         lines.push(renderFrameContentRow(line, width, borderColor, barBg));
       }
@@ -1510,13 +1744,24 @@ function patchToolCallFraming(): void {
           while (rest < last && isBlankRenderedLine(rawCall[rest])) rest++;
           if (rest < last) {
             bodyStart = rest;
-            framedHeader = `${fgAnsi(iconColor)}${icon}${FG_RESET} ${fgAnsi(HEX_TOOL.accent)}${title}:${FG_RESET} ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}`;
+            // omp leaves the colon on the default foreground, not the label's.
+            framedHeader = `${fgAnsi(iconColor)}${icon}${FG_RESET} ${fgAnsi(HEX_TOOL.accent)}${title}${FG_RESET}: ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}`;
           }
         }
 
+        // omp closes the header with a dim count of what the tool touched.
+        // Computed from the body only if a profile asks for it, so a large write
+        // is not walked twice per frame for a badge it does not have.
+        let strippedBody: readonly StrippedRow[] | undefined;
+        const summary = profile?.summary?.(asToolArgs(this.args), () => {
+          strippedBody ??= stripRows(rawCall.slice(bodyStart, last));
+          return strippedBody;
+        });
+        if (summary) framedHeader += ` ${summary}`;
+
         lines.push(buildFrameBar(width, "top", framedHeader, borderColor, barBg));
         for (let i = bodyStart; i < last; i++) {
-          lines.push(addSideBorders(rawCall[i], borderColor));
+          lines.push(frameBodyRow(rawCall[i], width, borderColor, barBg));
         }
       } else {
         lines.push(renderToolOneLine(rawCall[first], this.toolName));

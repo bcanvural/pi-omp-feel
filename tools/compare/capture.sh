@@ -37,9 +37,23 @@ settle() { # $1 = max seconds, $2 = consecutive unchanged rounds required
   done
 }
 
+# A pane that is still blank because the agent has not drawn yet is perfectly
+# stable, so `settle` on its own returns during startup and the idle capture
+# comes back empty. Wait for the prompt frame first; how long an agent takes to
+# get there depends on how many extensions it loads.
+await_frame() { # $1 = max seconds
+  local i
+  for i in $(seq 1 "$1"); do
+    tmux capture-pane -p -t "$SESSION" 2>/dev/null | grep -q '╭──' && return 0
+    sleep 1
+  done
+  return 1
+}
+
 tmux kill-session -t "$SESSION" 2>/dev/null
 tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" -c "$WORK"
 tmux send-keys -t "$SESSION" "clear; cd '$WORK' && $CMD" Enter
+await_frame 90 || echo "  warning: no prompt frame after 90s" >&2
 settle 40 3
 tmux capture-pane -p -e -t "$SESSION" > "${OUT}-idle.ansi"
 tmux capture-pane -p    -t "$SESSION" > "${OUT}-idle.txt"

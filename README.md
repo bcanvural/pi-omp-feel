@@ -24,13 +24,13 @@ Do **not** confuse it with two unrelated things that answer to the same names:
 - **Prompt input**: the input box is reshaped into omp's rounded-corner `╭──╮`/`╰──╯` frame with padded side rails and a correctly positioned cursor (via the supported `setEditorComponent` hook; editing, keybindings, and autocomplete stay on the stock `CustomEditor` core). The full status line occupies the top border, mirroring omp.
 - **Working indicator**: colored braille spinner (accent) while streaming.
 - **Hidden thinking label**: shows `…` instead of the default hidden-thinking text.
-- **Tool-call framing**: built-in tool calls (`bash`, `read`, `write`, `ssh`, `mcp`, …) render inside omp-style rounded blocks with state-colored borders over pi's usual state background tint. Bash follows omp's command-first layout with an `Output` divider; other default-rendered tools use status headers (`⏳`/`⟳`, `✘`, `❯`/`✎`/`⇄`/`🔌`) where applicable.
+- **Tool-call framing**: tool calls (`bash`, `read`, `write`, `ssh`, `mcp`, …) render inside omp-style rounded blocks with state-colored borders over pi's usual state background tint. Bash follows omp's command-first layout with an `Output` divider; other default-rendered tools use status headers (`⏳`/`⟳`, `✘`, `❯`/`✎`/`⇄`/`🔌`) where applicable. `write` and `edit` close their header the way omp does, with `· 4 lines` and `⟨+1/-1⟩`. Tools registered by other extensions are framed too — see below.
 
 ## Where this reaches past pi's public API
 
 Two things omp does natively have no supported equivalent in pi, so they are done structurally:
 
-**Tool-call framing.** pi's core `ToolExecutionComponent` frames built-in tools itself (a tinted Box, no borders) and exposes no hook to restyle it; `registerTool({ renderCall, renderResult, renderShell })` only applies to tools the extension itself registers. The pi extension loader aliases `@earendil-works/pi-coding-agent` to the very same module instance core imports, so this extension patches the shared `ToolExecutionComponent.prototype.render` to wrap the default path in an omp-style frame, reading private fields (`contentBox`, `callRendererComponent`, …) as it goes. Tools whose definitions supply their own renderer (`renderShell === "self"`, e.g. `edit`) are left untouched.
+**Tool-call framing.** pi's core `ToolExecutionComponent` frames built-in tools itself (a tinted Box, no borders) and exposes no hook to restyle it; `registerTool({ renderCall, renderResult, renderShell })` only applies to tools the extension itself registers. The pi extension loader aliases `@earendil-works/pi-coding-agent` to the very same module instance core imports, so this extension patches the shared `ToolExecutionComponent.prototype.render` to wrap the default path in an omp-style frame, reading private fields (`contentBox`, `callRendererComponent`, …) as it goes. Tools whose definitions supply their own renderer (`renderShell === "self"`) are left untouched unless their profile opts in with `frameSelfRendered`, which only `edit` does: what pi calls a shell there is a background-tinted `Box` holding a diff, the same shape every other block is built from, so it can be framed without touching the diff itself.
 
 **Prompt framing.** omp's TUI has a first-class top-border provider (`packages/tui`, `editor-top-border-provider`); pi's does not. So `OmpEditor` post-processes the rows the stock editor returns, identifying its flat `─` border rows and reshaping them.
 
@@ -43,6 +43,26 @@ pi @~/.pi/agent/pi-omp-feel-degraded.md "fix this"
 ```
 
 The guards cost nothing measurable: the latch plus `try`/`catch` adds ~0.1 ns per render call, and reporting only runs on the single failure.
+
+## Tools from other extensions
+
+A tool that arrives from another extension is framed like any other. Without being told anything about it, it gets a titled block — or a single row, when a single row is all it draws — and its name is read as a label rather than an identifier, so `exec_command` heads its block as `Exec command`.
+
+Some tools deserve better than that default, and `TOOL_PROFILES` in `src/index.ts` is where one says so:
+
+| field | effect |
+| --- | --- |
+| `headerless` | lead with the command instead of a header, as omp's bash block does |
+| `sections` | draw call and result as omp's two sections, divided by `├─── Output ───┤` |
+| `command` | where the shell command lives in `args`, so the row can be re-rendered dim-`$` and syntax-highlighted |
+| `detail` | the dim `(cwd: … · tty)` suffix that follows a command, built from `args` |
+| `wall` | fold the tool's timing row into omp's `⟨Wall: … \| Exit: …⟩` badge |
+| `summary` | close the header the way omp does — `· 4 lines` on a write, `⟨+1/-1⟩` on an edit |
+| `frameSelfRendered` | frame this tool even though it declares `renderShell: "self"` |
+
+`pi-runbg` ships profiled: `exec_command` is a shell command that outlives the call, so it gets exactly what omp gives bash, and `write_stdin` keeps its header because keystrokes are not a command. What omp has no vocabulary for — the session id, the log path — stays beside the badge rather than being folded into it.
+
+The extensions being described do not know this file exists and do not need to. Everything comes from `args`, which is structured, or from matching rows they already draw — and a match that fails leaves their own output showing rather than breaking the block. A profile is also ignored for a tool whose renderers are absent, which is what a transcript replayed after uninstalling that extension looks like.
 
 ## Glyph presets
 
@@ -94,7 +114,7 @@ for n in 03 05 07 09; do
 done
 ```
 
-Two cautions. Passing a prompt runs a real turn: it spends tokens and lets the agent execute tools, which is why the workspace must be disposable — `capture.sh` also refuses to type a prompt unless it can see the prompt frame, because otherwise the keystrokes reach the shell and get executed. And omp is far ahead of pi in version, so a difference is not automatically a porting bug; it may be something pi has no equivalent for.
+Two cautions. Passing a prompt runs a real turn: it spends tokens and lets the agent execute tools, which is why the workspace must be disposable — `capture.sh` also refuses to type a prompt unless it can see the prompt frame, because otherwise the keystrokes reach the shell and get executed. It waits up to 90 s for that frame before settling, since a blank startup pane is perfectly stable and settling alone would capture it. And omp is far ahead of pi in version, so a difference is not automatically a porting bug; it may be something pi has no equivalent for.
 
 ## Development
 
