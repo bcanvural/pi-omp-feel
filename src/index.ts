@@ -1280,7 +1280,16 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
   ["write_stdin", { sections: true, wall: runbgWall }],
   ["write", { summary: writeLineSummary }],
   ["edit", { frameSelfRendered: true, summary: editDiffSummary }],
+  // pi-ask. One question puts itself in the header via the usual target hoist;
+  // several need saying, since only the first would otherwise be visible.
+  ["ask", { summary: askQuestionSummary }],
 ]);
+
+function askQuestionSummary(args: ToolArgs): string | undefined {
+  const questions = args.questions;
+  if (!Array.isArray(questions) || questions.length < 2) return undefined;
+  return `${fgAnsi(HEX_TOOL.dim)}· ${questions.length} questions${FG_RESET}`;
+}
 
 /** omp closes a write header with `· 4 lines`, counting the file it wrote — the
  * trailing newline included, which is why a three-line file reads as four and
