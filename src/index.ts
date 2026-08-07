@@ -668,11 +668,28 @@ const SHIMMER_PEAK_RADIUS = 2;
 const SHIMMER_FADE_RADIUS = 4;
 const SHIMMER_REST_FRAMES = 8;
 
+/** omp does not always say "Working…" — it names what it is waiting on, and the
+ * shimmer sweeps whatever that says. pi keeps its label in a slot the frames
+ * cannot see (`Loader` renders `frames + message`), so an extension that sets a
+ * working message here would have it appended after ours rather than replacing
+ * it. `ACTIVITY_CHANNEL` is how another extension hands its label over instead;
+ * see the README. Empty or absent restores "Working…". */
+export const ACTIVITY_CHANNEL = "ui:activity";
+let activityLabel: string | undefined;
+
+function workingLabel(): string {
+  return activityLabel ?? OMP_WORKING_TEXT;
+}
+
 /** Cells the band travels across: the label, the joining space, and the hint. */
-const OMP_SHIMMER_CELLS = [...OMP_WORKING_TEXT].length + 1 + [...OMP_WORKING_HINT].length;
+function shimmerCells(label: string): number {
+  return [...label].length + 1 + [...OMP_WORKING_HINT].length;
+}
 
 /** One full cycle: the band enters, crosses every cell, leaves, then rests. */
-const OMP_SHIMMER_PERIOD = OMP_SHIMMER_CELLS + 2 * SHIMMER_FADE_RADIUS + SHIMMER_REST_FRAMES;
+function shimmerPeriod(label: string): number {
+  return shimmerCells(label) + 2 * SHIMMER_FADE_RADIUS + SHIMMER_REST_FRAMES;
+}
 
 function leastCommonMultiple(a: number, b: number): number {
   const greatestCommonDivisor = (x: number, y: number): number => (y === 0 ? x : greatestCommonDivisor(y, x % y));
@@ -682,18 +699,21 @@ function leastCommonMultiple(a: number, b: number): number {
 // Pi cycles the supplied frames verbatim, so the list has to span a whole number
 // of both the spinner and the shimmer cycle. A shorter list wraps one of them
 // mid-cycle: at 16 frames the 10-glyph spinner jumped five positions on every
-// wrap, roughly once a second.
-const OMP_WORKING_FRAME_COUNT = leastCommonMultiple(OMP_WORKING_FRAMES.length, OMP_SHIMMER_PERIOD);
+// wrap, roughly once a second. The label's length feeds the shimmer cycle, so
+// this is recomputed whenever the label changes.
+function workingFrameCount(label: string): number {
+  return leastCommonMultiple(OMP_WORKING_FRAMES.length, shimmerPeriod(label));
+}
 
 function workingAccent(ctx: ExtensionContext): string {
   const sessionName = currentSessionName(ctx);
   return sessionName ? sessionAccentHex(sessionName) : HEX.peach;
 }
 
-function workingMessage(accent: string, frame: number): string {
-  const labelCells = [...OMP_WORKING_TEXT];
+function workingMessage(label: string, accent: string, frame: number): string {
+  const labelCells = [...label];
   const cells = [...labelCells, " ", ...OMP_WORKING_HINT];
-  const center = (frame % OMP_SHIMMER_PERIOD) - SHIMMER_FADE_RADIUS;
+  const center = (frame % shimmerPeriod(label)) - SHIMMER_FADE_RADIUS;
 
   return cells
     .map((character, index) => {
@@ -716,24 +736,26 @@ function workingMessage(accent: string, frame: number): string {
 // The frames depend on nothing but the accent, while `configureWorkingIndicator`
 // runs on every `agent_start`. Rebuilding all 70 every turn threw away ~14 KB per
 // turn for an identical result, so keep the last set.
-let cachedWorkingFrames: { accent: string; frames: string[] } | undefined;
+let cachedWorkingFrames: { label: string; accent: string; frames: string[] } | undefined;
 
-function workingFrames(accent: string): string[] {
-  if (cachedWorkingFrames?.accent === accent) return cachedWorkingFrames.frames;
+function workingFrames(label: string, accent: string): string[] {
+  if (cachedWorkingFrames?.accent === accent && cachedWorkingFrames.label === label) {
+    return cachedWorkingFrames.frames;
+  }
   // Pi treats supplied frames as verbatim. Include the message in each frame so
   // the Loader's own 80 ms animation advances the shimmer reliably rather than
   // relying on a second timer that can be replaced by core status events.
-  const frames = Array.from({ length: OMP_WORKING_FRAME_COUNT }, (_, index) => {
+  const frames = Array.from({ length: workingFrameCount(label) }, (_, index) => {
     const spinner = OMP_WORKING_FRAMES[index % OMP_WORKING_FRAMES.length];
-    return `${fgAnsi(accent)}${spinner}${FG_RESET} ${workingMessage(accent, index)}`;
+    return `${fgAnsi(accent)}${spinner}${FG_RESET} ${workingMessage(label, accent, index)}`;
   });
-  cachedWorkingFrames = { accent, frames };
+  cachedWorkingFrames = { label, accent, frames };
   return frames;
 }
 
 function configureWorkingIndicator(ctx: ExtensionContext): void {
   ctx.ui.setWorkingIndicator({
-    frames: workingFrames(workingAccent(ctx)),
+    frames: workingFrames(workingLabel(), workingAccent(ctx)),
     intervalMs: 80,
   });
   // omp uses a Unicode ellipsis and an explicit Esc hint instead of pi's
@@ -1212,6 +1234,10 @@ interface ToolProfile {
   headerless?: boolean;
   /** Header label, when the derived one is wrong. */
   title?: string;
+  /** omp gives this tool no identity glyph, so do not fall back to the generic
+   * one — that invents an identity omp withholds. Only affects the settled
+   * header; a pending or failed block still shows its status glyph. */
+  iconless?: boolean;
   /** Frame this tool even though it declares `renderShell: "self"`.
    *
    * Opt-in per tool, never blanket: a tool that draws its own shell may already
@@ -1282,7 +1308,7 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
   ["edit", { frameSelfRendered: true, summary: editDiffSummary }],
   // pi-ask. One question puts itself in the header via the usual target hoist;
   // several need saying, since only the first would otherwise be visible.
-  ["ask", { summary: askQuestionSummary }],
+  ["ask", { iconless: true, summary: askQuestionSummary }],
 ]);
 
 function askQuestionSummary(args: ToolArgs): string | undefined {
@@ -1687,11 +1713,12 @@ function patchToolCallFraming(): void {
       icon = glyphs().status.error;
       iconColor = HEX_TOOL.error;
     } else {
-      icon = glyphs().tool[this.toolName] ?? ICON.model;
+      icon = profile?.iconless ? "" : (glyphs().tool[this.toolName] ?? ICON.model);
       iconColor = HEX_TOOL.accent;
     }
 
-    const header = `${fgAnsi(iconColor)}${icon}${FG_RESET} ${fgAnsi(HEX_TOOL.accent)}${toolTitle(this.toolName)}${FG_RESET}`;
+    const iconPrefix = icon ? `${fgAnsi(iconColor)}${icon}${FG_RESET} ` : "";
+    const header = `${iconPrefix}${fgAnsi(HEX_TOOL.accent)}${toolTitle(this.toolName)}${FG_RESET}`;
     // `theme.bg()` returns `<bg-ansi><text>\x1b[49m`, so an empty probe carries
     // the same background prefix a rendered box row would.
     const barBg = boxLines
@@ -1754,7 +1781,7 @@ function patchToolCallFraming(): void {
           if (rest < last) {
             bodyStart = rest;
             // omp leaves the colon on the default foreground, not the label's.
-            framedHeader = `${fgAnsi(iconColor)}${icon}${FG_RESET} ${fgAnsi(HEX_TOOL.accent)}${title}${FG_RESET}: ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}`;
+            framedHeader = `${iconPrefix}${fgAnsi(HEX_TOOL.accent)}${title}${FG_RESET}: ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}`;
           }
         }
 
@@ -1872,6 +1899,20 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
       ctx.ui.setStatus(GLYPH_STATUS_KEY, undefined);
       applyGlyphPreset(chosen);
     },
+  });
+
+  // Another extension naming what it is waiting on — see ACTIVITY_CHANNEL.
+  pi.events?.on?.(ACTIVITY_CHANNEL, (data: unknown) => {
+    const raw = (data as { label?: unknown } | undefined)?.label;
+    const next =
+      typeof raw === "string" && raw.trim().length > 0 ? sanitizeStatusText(raw) : undefined;
+    if (next === activityLabel) return;
+    activityLabel = next;
+    if (currentCtx && currentCtx.mode === "tui" && currentCtx.hasUI) {
+      // Also re-clears pi's own message slot, so a sender that set both does not
+      // get its label rendered twice.
+      configureWorkingIndicator(currentCtx);
+    }
   });
 
   pi.on("session_start", (_event, ctx) => {
