@@ -30,6 +30,7 @@ const HEX = {
   surface0: "#313244",
   overlay0: "#6c7086",
   overlay1: "#7f849c",
+  overlay2: "#9399b2",
   text: "#cdd6f4",
   peach: "#fab387",
   pink: "#f5c2e7",
@@ -216,14 +217,21 @@ function isGlyphPreset(value: unknown): value is GlyphPreset {
 
 const SETTINGS_FILE_NAME = "pi-omp-feel.json";
 
+/** omp hangs a few lines of the file under a read only when its own
+ * `read.toolResultPreview` is turned on, and that setting ships off — a read
+ * is a summary row by default. Same here, same default; set `readPreview` in
+ * the settings file beside the glyph preset to turn it on. */
+let readPreviewEnabled = false;
+
 /** Remember the chosen preset across sessions. pi has no per-extension settings
  * store, so keep a small file of our own beside the degrade report. */
 function loadGlyphPreset(): void {
   try {
     const path = join(getAgentDir(), SETTINGS_FILE_NAME);
     if (!existsSync(path)) return;
-    const stored = JSON.parse(readFileSync(path, "utf8")) as { glyphs?: unknown };
+    const stored = JSON.parse(readFileSync(path, "utf8")) as { glyphs?: unknown; readPreview?: unknown };
     if (isGlyphPreset(stored.glyphs)) glyphPreset = stored.glyphs;
+    if (typeof stored.readPreview === "boolean") readPreviewEnabled = stored.readPreview;
   } catch {
     // An unreadable or malformed settings file must not stop the extension
     // loading; the default preset applies instead.
@@ -233,7 +241,10 @@ function loadGlyphPreset(): void {
 function saveGlyphPreset(): void {
   try {
     mkdirSync(getAgentDir(), { recursive: true });
-    writeFileSync(join(getAgentDir(), SETTINGS_FILE_NAME), `${JSON.stringify({ glyphs: glyphPreset }, null, 2)}\n`);
+    writeFileSync(
+      join(getAgentDir(), SETTINGS_FILE_NAME),
+      `${JSON.stringify({ glyphs: glyphPreset, readPreview: readPreviewEnabled }, null, 2)}\n`,
+    );
   } catch {
     // Persisting is best effort — the choice still holds for this session.
   }
@@ -1452,13 +1463,17 @@ function toolCallRowTarget(contentLine: string, toolName: string): string {
  * single row instead of a block: an uncoloured bullet, the label in `toolTitle`,
  * then the target in `accent`. Neither of omp's glyph presets defines a
  * `tool.read`/`tool.grep`/`tool.ls` entry, which is how it marks them out. */
-function renderToolOneLine(contentLine: string, component: FramedToolComponent): string {
-  const target = toolCallRowTarget(contentLine, component.toolName);
-  // Same name the frame would use: a tool that draws one row while pending
-  // and a block once it settles must not appear to be two different tools.
-  const title = toolHeaderTitle(component);
+function renderToolOneLine(target: string, title: string): string {
   const head = ` ${glyphs().status.bullet} ${fgAnsi(HEX.lavender)}${title}${FG_RESET}`;
   return target ? `${head} ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}` : head;
+}
+
+/** A path the way omp shows one: relative to the directory the session is in,
+ * or with the home prefix folded, rather than pi's absolute spelling. */
+function displayToolPath(path: string): string {
+  const cwd = currentCtx?.cwd;
+  if (cwd && path.startsWith(`${cwd}${sep}`)) return path.slice(cwd.length + 1);
+  return shortenPath(path);
 }
 
 interface RenderableToolPart {
@@ -1514,6 +1529,126 @@ function renderToolPart(part: RenderableToolPart | undefined, width: number): st
   return lines;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Shell command colouring
+//
+// omp tokenizes a command with syntect's shell grammar and colours nearly
+// every word: the command and its bare arguments in `syntaxFunction`, flag
+// dashes in `syntaxPunctuation` with their letters in `syntaxVariable`,
+// pipes and separators in `syntaxKeyword`, quoted text in `syntaxString`.
+// pi highlights with highlight.js, whose shell grammar marks only strings,
+// comments and a handful of builtins, so a captured command row came back
+// almost entirely uncoloured beside omp's. Nothing in a theme closes that —
+// it is what the two tokenizers see — so the command row gets this instead:
+// a small shell lexer that reproduces omp's assignment of colour to token,
+// and nothing else. It runs on one line of text that the tool already told
+// us is a shell command; anything it cannot classify stays a plain argument.
+// ───────────────────────────────────────────────────────────────────────────
+
+const SHELL_KEYWORDS = new Set([
+  "for", "in", "do", "done", "if", "then", "else", "elif", "fi", "while", "until",
+  "case", "esac", "select", "function", "return", "break", "continue", "local", "export",
+]);
+
+/** `|`, `||`, `&&`, `;`, `&`, and the redirection family. */
+const SHELL_OPERATOR_LEAD = /[|;&<>]/;
+
+function highlightShellCommand(command: string): string {
+  const fn = fgAnsi(HEX.blue);
+  const punct = fgAnsi(HEX.overlay2);
+  const variable = fgAnsi(HEX.text);
+  const string = fgAnsi(HEX.green);
+  const keyword = fgAnsi(HEX.mauve);
+  const comment = fgAnsi(HEX.overlay0);
+  const number = fgAnsi(HEX.peach);
+  const paint = (color: string, text: string): string => (text ? `${color}${text}${FG_RESET}` : "");
+
+  let out = "";
+  let index = 0;
+  // A command word is the first word of the line and of every segment an
+  // operator opens; the words after it are its arguments. omp paints both in
+  // the same colour, so the distinction only matters for keywords.
+  const isWord = (char: string): boolean => !/[\s|;&<>]/.test(char);
+
+  while (index < command.length) {
+    const char = command[index];
+
+    if (char === "\n" || /\s/.test(char)) {
+      out += char;
+      index++;
+      continue;
+    }
+
+    if (char === "#") {
+      const end = command.indexOf("\n", index);
+      const stop = end === -1 ? command.length : end;
+      out += paint(comment, command.slice(index, stop));
+      index = stop;
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      const quote = char;
+      let end = index + 1;
+      while (end < command.length && command[end] !== quote) {
+        if (command[end] === "\\" && quote === '"') end++;
+        end++;
+      }
+      const closed = end < command.length;
+      const body = command.slice(index + 1, closed ? end : command.length);
+      out += paint(punct, quote);
+      // omp lets an expansion break the string colour, `$` punctuation and the
+      // name beside it a variable, and leaves single quotes literal.
+      if (quote === '"') {
+        let rest = body;
+        while (rest.length > 0) {
+          const at = rest.search(/\$\{?\w/);
+          if (at === -1) break;
+          out += paint(string, rest.slice(0, at));
+          const name = /^\$\{?\w+\}?/.exec(rest.slice(at))?.[0] ?? "$";
+          out += paint(punct, name.slice(0, name.startsWith("${") ? 2 : 1));
+          out += paint(variable, name.slice(name.startsWith("${") ? 2 : 1));
+          rest = rest.slice(at + name.length);
+        }
+        out += paint(string, rest);
+      } else {
+        out += paint(string, body);
+      }
+      if (closed) out += paint(punct, quote);
+      index = closed ? end + 1 : command.length;
+      continue;
+    }
+
+    if (SHELL_OPERATOR_LEAD.test(char)) {
+      let end = index;
+      while (end < command.length && SHELL_OPERATOR_LEAD.test(command[end])) end++;
+      out += paint(keyword, command.slice(index, end));
+      index = end;
+      continue;
+    }
+
+    let end = index;
+    while (end < command.length && isWord(command[end]) && command[end] !== "'" && command[end] !== '"') end++;
+    const word = command.slice(index, end);
+    index = end;
+
+    if (SHELL_KEYWORDS.has(word)) {
+      out += paint(keyword, word);
+    } else if (word.startsWith("-")) {
+      // A flag reads as its dashes and its name, coloured apart.
+      const dashes = /^-+/.exec(word)?.[0] ?? "-";
+      out += paint(punct, dashes) + paint(variable, word.slice(dashes.length));
+    } else if (/^\d+$/.test(word)) {
+      out += paint(number, word);
+    } else if (word.startsWith("$")) {
+      out += paint(punct, word.slice(0, word.startsWith("${") ? 2 : 1)) + paint(variable, word.slice(word.startsWith("${") ? 2 : 1));
+    } else {
+      out += paint(fn, word);
+    }
+  }
+  return out;
+}
+
 // The command string of a given tool call never changes, but the block
 // re-renders (and re-highlights) on every state change — including each
 // streaming chunk. Cache the tokenized output, bounded by command count.
@@ -1524,7 +1659,7 @@ function highlightBashCommand(command: string): string[] {
   const cached = bashHighlightCache.get(command);
   if (cached !== undefined) return cached;
   if (bashHighlightCache.size >= BASH_HIGHLIGHT_CACHE_MAX) bashHighlightCache.clear();
-  const highlighted = highlightCode(command, "bash");
+  const highlighted = highlightShellCommand(command).split("\n");
   bashHighlightCache.set(command, highlighted);
   return highlighted;
 }
@@ -1679,9 +1814,9 @@ function dimRow(text: string): string {
 }
 
 /** omp resolves this hint from its live keybindings; pi offers extensions no
- * accessor for the expand binding, so this carries pi's default, in the same
- * lowercase style as the working indicator's `⟨esc⟩`. */
-const EXPAND_HINT = "⟨ctrl+o: Expand⟩";
+ * accessor for the expand binding, so this carries pi's default, spelled the
+ * way omp's own `formatExpandHint` spells it (captured from its transcript). */
+const EXPAND_HINT = "⟨Ctrl+O: Expand⟩";
 
 /** omp's `capPreviewLines` marker: a tail window hides its head. */
 function earlierLinesMarker(hidden: number): string {
@@ -2207,6 +2342,7 @@ function renderResultPreview(
   component: FramedToolComponent,
   width: number,
 ): readonly string[] | undefined {
+  if (!readPreviewEnabled) return undefined;
   if (profile?.resultText === undefined || component.expanded || component.result?.isError) return undefined;
   const text = profile.resultText(component.result);
   if (!text) return undefined;
@@ -2947,33 +3083,56 @@ function patchToolCallFraming(): void {
       // drew a single row: its pending fallback is one bare name row, and the
       // one-line bullet would hide the args line omp's call view shows.
       const defaultBody = renderDefaultToolBody(this, width);
+
+      // pi writes a tool's call as one logical line and its content after a
+      // blank one, so the call is the leading run of non-blank rows — however
+      // many rows pi-tui wrapped it across. A long absolute path routinely
+      // takes three, and reading only the first row used to leave the target
+      // unfound: no name in the header, the path spelled across the body, and
+      // every rebuild below skipped because the call row was never claimed.
+      let callEnd = first;
+      while (callEnd < last && !isBlankRenderedLine(rawCall[callEnd])) callEnd++;
+      let bodyStart = callEnd;
+      while (bodyStart < last && isBlankRenderedLine(rawCall[bodyStart])) bodyStart++;
+
+      // The row itself names the target when it fits on one; when it wrapped,
+      // only a tool that says where its path lives can still be read — and
+      // then it is rendered omp's way, relative to the directory it is in.
+      const wrapped = callEnd - first > 1;
+      const profilePath = profile?.contentPath?.(asToolArgs(this.args));
+      const target = wrapped
+        ? (profilePath ? displayToolPath(profilePath) : "")
+        : toolCallRowTarget(rawCall[first], this.toolName);
+      // omp marks a path target with its file glyph; a target that is not a
+      // path — a grep pattern, a URL — is left bare.
+      const targetGlyph = profilePath && target ? `${glyphs().node.scalar} ` : "";
+      const title = toolHeaderTitle(this);
+      // Nothing but the call line: omp draws that as a single row, whatever
+      // number of rows pi needed for it. Only claimed for a tool whose path
+      // this reads from `args`, so an unrecognized body can never collapse.
+      const callOnly = bodyStart >= last && target !== "" && (!wrapped || profilePath !== undefined);
+
       framed =
         defaultBody !== undefined ||
-        last - first !== 1 ||
+        (!callOnly && last - first !== 1) ||
         glyphs().tool[this.toolName] !== undefined ||
         this.result?.isError === true ||
         this.imageComponents.length > 0;
 
       if (framed) {
         // omp names the target in the header — `Write: note.txt` — rather than
-        // repeating it as the first row of the body. Hoist pi's leading call row
-        // when there is one, but only if real content is left behind: an empty
+        // repeating it as the first row of the body. Hoist pi's call rows when
+        // there is a target, but only if real content is left behind: an empty
         // frame is worse than a repeated target.
-        const target = toolCallRowTarget(rawCall[first], this.toolName);
-        const title = toolHeaderTitle(this);
-        let bodyStart = first;
         let framedHeader = header;
         // A renderer-less tool's body is rebuilt as omp's document view, args
         // included — hoisting pi's call row would put the raw args JSON in the
         // header the rebuild just cleaned up.
-        if (target && !defaultBody) {
-          let rest = first + 1;
-          while (rest < last && isBlankRenderedLine(rawCall[rest])) rest++;
-          if (rest < last) {
-            bodyStart = rest;
-            // omp leaves the colon on the default foreground, not the label's.
-            framedHeader = `${iconPrefix}${fgAnsi(HEX_TOOL.accent)}${title}${FG_RESET}: ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}`;
-          }
+        if (target && !defaultBody && bodyStart < last) {
+          // omp leaves the colon on the default foreground, not the label's.
+          framedHeader = `${iconPrefix}${fgAnsi(HEX_TOOL.accent)}${title}${FG_RESET}: ${fgAnsi(HEX_TOOL.accent)}${targetGlyph}${target}${FG_RESET}`;
+        } else {
+          bodyStart = first;
         }
 
         // The body is stripped once and shared by the summary badge and the
@@ -3013,7 +3172,7 @@ function patchToolCallFraming(): void {
           }
         }
       } else {
-        lines.push(renderToolOneLine(rawCall[first], this));
+        lines.push(renderToolOneLine(target, title));
         const preview = renderResultPreview(profile, this, width);
         if (preview) lines.push(...preview);
       }
