@@ -49,7 +49,9 @@ The guards cost nothing measurable: the latch plus `try`/`catch` adds ~0.1 ns pe
 
 A tool that arrives from another extension is framed like any other. Without being told anything about it, it gets a titled block — or a single row, when a single row is all it draws — and its name is read as a label rather than an identifier, so `exec_command` heads its block as `Exec command`.
 
-A tool that ships no renderer of its own gets omp's structured default instead of pi's pretty-printed JSON: its args as a dim `└─ key=value, …` line under the header, and a result that parses as JSON as omp's document tree — guide lines, muted keys, dim values, node icons — two levels and six lines deep collapsed, six levels and two hundred lines expanded. This is what MCP tool calls look like, without anything here knowing what an MCP tool is called: the gate is the missing renderer, never a name. Errors and non-JSON results keep pi's own rows.
+A tool that ships no renderer of its own gets omp's structured default instead of pi's pretty-printed JSON. It heads its block with the label it declared for itself rather than a title spelled out of its identifier, shows its args as a dim `└─ key=value, …` line, and renders a result that parses as JSON as omp's document tree — guide lines, muted keys, dim values, node icons — two levels and six lines deep collapsed, six levels and two hundred lines expanded. A result that is not a document (plain text, or JSON the tool truncated mid-structure) gets omp's raw window instead: four lines collapsed, twelve expanded, `… N more lines` below them, and a trailing bracketed notice — the line that says where the whole output went — kept whole beneath the marker rather than counted into it.
+
+This is what MCP tool calls look like, without anything here knowing what an MCP tool is called: the gate is the missing renderer, never a name. Errors keep pi's own rows.
 
 Some tools deserve better than that default, and `TOOL_PROFILES` in `src/index.ts` is where one says so:
 

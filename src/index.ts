@@ -802,7 +802,7 @@ const DEGRADED_ASSUMPTIONS: Record<DegradedSubsystem, string[]> = {
   "tool-framing": [
     "`ToolExecutionComponent.prototype.render` can be patched, because the extension loader resolves `@earendil-works/pi-coding-agent` to the same module instance pi core imports.",
     "Instance members read: `hideComponent`, `hasRendererDefinition()`, `getCallRenderer()`, `getResultRenderer()`, `getRenderShell()`, `contentBox.render()`, `contentBox.bgFn()`, `contentText.render()`, `selfRenderContainer.render()`, `callRendererComponent`, `resultRendererComponent`, `args`, `imageComponents`, `imageSpacers`, `isPartial`, `executionStarted`, `expanded`, `result.isError`, `result.content`, `toolName`.",
-    "`hasRendererDefinition()` is definition presence; `getCallRenderer()`/`getResultRenderer()` returning undefined despite a definition is what a registered tool without renderers looks like — the population that gets the JSON document view.",
+    "`hasRendererDefinition()` is definition presence; `getCallRenderer()`/`getResultRenderer()` returning undefined despite a definition is what a registered tool without renderers looks like — the population that gets the document view. `toolDefinition.label` is that tool's self-declared name, used as its header.",
     "`expanded` is the component's Ctrl+O toggle, `false` while collapsed; `result.content` is the tool result's block list, whose `text` blocks carry the output the collapsed previews rebuild from; `result.details.fullOutputPath` names bash's persisted-output file, mirrored when stripping its footer.",
     "pi's diff rows parse as `([+-\\s])(\\s*\\d+) content` (see `parseDiffLine` in pi's `diff.ts`), each wrapped whole in one `toolDiff*` foreground; hunk gaps render as digitless `...` rows. Tabs are flattened to spaces before rendering, so indentation glyphs can only ever be `·`.",
     "pi's collapsed bash output is a visual-line tail whose window row (`... (N earlier lines, … to expand)`) renders first, with every output row — wrapped continuations included — opening with the same `toolOutput` foreground, and the warning/timing rows that follow opening with their own (see `rebuildBashResultRenderComponent`; `fullOutputPath` in `result.details` names the footer to strip).",
@@ -2477,11 +2477,63 @@ function renderJsonTreeLines(
   return { lines, truncated };
 }
 
+/** omp's raw-output window for the same population (`default-renderer.ts`):
+ * a result that is not a JSON document shows its first lines and says how
+ * many it kept back. */
+const TEXT_WINDOW_LINES_COLLAPSED = 4;
+const TEXT_WINDOW_LINES_EXPANDED = 12;
+
+/** pi's convention for a machine-facing footnote a tool appends to its own
+ * output — a whole line in brackets, `[Output truncated: … saved to: /tmp/x]`.
+ * omp keeps its equivalent out of the window because its truncation arrives on
+ * a separate channel; pi has none, so the shape is what holds this back. A
+ * line of real output that happens to be bracketed is mistaken for one, which
+ * costs it a colour and a place at the end — never its visibility. */
+const TRAILING_NOTICE_LINE = /^\[.*\]$/;
+
+/** omp's raw-output window. Lines are clipped rather than wrapped, as omp
+ * clips them, so the count in the marker is the count of real lines. */
+function buildTextWindowRows(text: string, expanded: boolean, innerWidth: number): string[] {
+  const lines = text.replace(/\t/g, "   ").split("\n");
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  // Where a truncated result says where the whole of it went, that line
+  // outlives the window — the path is the one thing a collapsed block must
+  // not swallow.
+  const notice =
+    lines.length > 1 && TRAILING_NOTICE_LINE.test(lines[lines.length - 1]) ? lines.pop() : undefined;
+
+  const max = expanded ? TEXT_WINDOW_LINES_EXPANDED : TEXT_WINDOW_LINES_COLLAPSED;
+  const shown = lines.slice(0, max);
+  const rows = shown.map(line => `${fgAnsi(HEX.overlay1)}${clipPlain(line, innerWidth)}${FG_RESET}`);
+  const hidden = lines.length - shown.length;
+  if (hidden > 0) rows.push(moreLinesMarker(hidden));
+  else if (!expanded) rows.push(dimRow(EXPAND_HINT));
+  // Wrapped, not clipped, unlike the output above it: this row exists to
+  // carry the path to the rest of the output, and a clipped path is no path.
+  if (notice !== undefined) {
+    rows.push(...new Text(`${fgAnsi(HEX.yellow)}${notice}${FG_RESET}`, 0, 0).render(innerWidth));
+  }
+  return rows;
+}
+
 // Tree rows depend only on the parsed text, the window, and the glyph preset
 // (node icons are baked into the rows), so the cache skips the parse + walk
 // on every repaint of a settled block.
 const jsonTreeCache = new Map<string, string[]>();
 const JSON_TREE_CACHE_MAX = 16;
+
+// The text window clips to the frame's inner width, so unlike the tree its
+// rows are width-bound and the key says so.
+const textWindowCache = new Map<string, string[]>();
+const TEXT_WINDOW_CACHE_MAX = 8;
+
+/** Drop the oldest entry so a resize, which re-renders every visible block at
+ * once, does not throw away the whole cache. */
+function evictOldest(cache: Map<string, string[]>, max: number): void {
+  if (cache.size < max) return;
+  const oldest = cache.keys().next().value;
+  if (oldest !== undefined) cache.delete(oldest);
+}
 
 /** Parse and walk one result text into finished tree rows; empty when the
  * text is not a renderable document. */
@@ -2517,57 +2569,78 @@ function toolIsRendererless(component: FramedToolComponent): boolean {
   return component.getCallRenderer() === undefined && component.getResultRenderer() === undefined;
 }
 
+/** The name a block wears. A tool that draws nothing itself gets the label it
+ * declared, verbatim — its own words beat a title derived from an identifier,
+ * which for a bridged `mcp__opensearch__opensearch_indices_query` reads
+ * `Mcp opensearch opensearch indices query`. omp titles that population from
+ * the same field. Tools that render themselves keep the derived title, since
+ * a label there is usually the bare identifier pi already shows. */
+function toolHeaderTitle(component: FramedToolComponent): string {
+  const override = TOOL_PROFILES.get(component.toolName)?.title;
+  if (override !== undefined) return override;
+  const label = component.toolDefinition?.label;
+  if (typeof label === "string" && label.trim().length > 0 && toolIsRendererless(component)) {
+    return sanitizeStatusText(label);
+  }
+  return toolTitle(component.toolName);
+}
+
 /** The omp default-renderer body for a tool without renderers: a dim inline
- * args row, then the JSON result as a document tree with omp's state windows.
- * Pending calls get the args row alone — omp's call view — instead of pi's
- * pretty-printed args block. Anything else (errors, non-JSON results, tools
- * with renderers) returns nothing and keeps pi's rows. The result text is the
- * JOINED text blocks; omp trees only the first — joined either parses whole
- * or falls back, which can only widen the fallback. */
-function renderJsonToolBody(component: FramedToolComponent, width: number): readonly string[] | undefined {
+ * args row, then the result — as a document tree when it parses as JSON, as
+ * omp's windowed raw output when it does not. Pending calls get the args row
+ * alone, omp's call view, instead of pi's pretty-printed args block. Errors
+ * and tools with renderers keep pi's rows. The result text is the JOINED text
+ * blocks; omp trees only the first — joined either parses whole or falls
+ * through to the window, which can only widen the fallback. */
+function renderDefaultToolBody(component: FramedToolComponent, width: number): readonly string[] | undefined {
   if (!toolIsRendererless(component) || component.result?.isError) return undefined;
 
+  const innerWidth = Math.max(1, width - 4);
   const args = asToolArgs(component.args);
   // omp leads this row with one alignment space (`default-renderer.ts`).
   const argsRow =
     Object.keys(args).length > 0
-      ? dimRow(` ${TREE_LAST} ${formatArgsInline(args, Math.max(20, width - 4 - visibleWidth(TREE_LAST) - 2))}`)
+      ? dimRow(` ${TREE_LAST} ${formatArgsInline(args, Math.max(20, innerWidth - visibleWidth(TREE_LAST) - 2))}`)
       : undefined;
-
-  if (component.isPartial) return argsRow ? [argsRow] : undefined;
-
-  const text = toolResultText(component.result)?.trim();
-  if (!text || !(text.startsWith("{") || text.startsWith("["))) return undefined;
-
-  // The cached rows embed preset glyphs, so the preset is part of the key;
-  // a hit also skips re-parsing the (possibly large) result on every repaint.
-  const expanded = component.expanded;
-  const key = `${glyphPreset} ${expanded ? 1 : 0} ${text}`;
-  let treeRows = jsonTreeCache.get(key);
-  if (treeRows === undefined) {
-    treeRows = buildJsonTreeRows(text, expanded);
-    if (jsonTreeCache.size >= JSON_TREE_CACHE_MAX) {
-      // Oldest-out keeps the resident set warm; a cyclic sweep over more
-      // documents than the cache holds still misses throughout, like any
-      // FIFO — the frame memo above is what shields steady state.
-      const oldest = jsonTreeCache.keys().next().value;
-      if (oldest !== undefined) jsonTreeCache.delete(oldest);
-    }
-    jsonTreeCache.set(key, treeRows);
-  }
-  // The empty entry is the cached "not a tree" verdict: unparseable text
-  // (JSON cut by truncation) or an empty document (`{}`, `[]`), where omp
-  // falls back to raw text rather than framing a lone expand hint. Cached so
-  // a large unparseable result is not re-parsed on every repaint.
-  if (treeRows.length === 0) return undefined;
   // omp's default renderer shows this same inline row on settled collapsed
   // blocks; expanded, it switches to a labeled args tree. The one-line row
   // serves both states here — a deliberate simplification.
-  const rows = argsRow ? [argsRow, ...treeRows] : treeRows;
-  // omp's cells wrap overlong rows; this frame's renderer truncates, so wrap
-  // here — after the cache, which stays width-independent — or an expanded
-  // 2000-char scalar would be unviewable in the one state meant to show it.
-  return new Text(rows.join("\n"), 0, 0).render(Math.max(1, width - 4));
+  const lead = argsRow ? [argsRow] : [];
+
+  const text = component.isPartial ? undefined : toolResultText(component.result)?.trim();
+  if (!text) return argsRow ? lead : undefined;
+
+  const expanded = component.expanded;
+  if (text.startsWith("{") || text.startsWith("[")) {
+    // The cached rows embed preset glyphs, so the preset is part of the key;
+    // a hit also skips re-parsing the (possibly large) result on every repaint.
+    const key = `${glyphPreset} ${expanded ? 1 : 0} ${text}`;
+    let treeRows = jsonTreeCache.get(key);
+    if (treeRows === undefined) {
+      treeRows = buildJsonTreeRows(text, expanded);
+      evictOldest(jsonTreeCache, JSON_TREE_CACHE_MAX);
+      jsonTreeCache.set(key, treeRows);
+    }
+    // An empty entry is the cached "not a document" verdict — unparseable
+    // text (JSON cut by truncation) or an empty document — and falls through
+    // to the raw window exactly as omp's renderer does.
+    if (treeRows.length > 0) {
+      // omp's cells wrap overlong rows; this frame's renderer truncates, so
+      // wrap here — after the cache, which stays width-independent — or an
+      // expanded 2000-char scalar would be unviewable in the one state meant
+      // to show it.
+      return new Text([...lead, ...treeRows].join("\n"), 0, 0).render(innerWidth);
+    }
+  }
+
+  const textKey = `${expanded ? 1 : 0} ${innerWidth} ${text}`;
+  let textRows = textWindowCache.get(textKey);
+  if (textRows === undefined) {
+    textRows = buildTextWindowRows(text, expanded, innerWidth);
+    evictOldest(textWindowCache, TEXT_WINDOW_CACHE_MAX);
+    textWindowCache.set(textKey, textRows);
+  }
+  return [...lead, ...textRows];
 }
 
 /** Structural view of the patched component (the compiled class fields are public). */
@@ -2585,6 +2658,9 @@ interface FramedToolComponent {
   /** Where pi puts the tool's own component when `renderShell` is `"self"`. */
   selfRenderContainer: { render(width: number): string[] };
   args?: unknown;
+  /** The tool's own definition, when pi has one — its `label` is the name the
+   * tool chose for itself. */
+  toolDefinition?: { label?: unknown };
   callRendererComponent?: RenderableToolPart;
   resultRendererComponent?: RenderableToolPart;
   imageComponents: { render(width: number): string[] }[];
@@ -2732,7 +2808,7 @@ function patchToolCallFraming(): void {
     }
 
     const iconPrefix = icon ? `${fgAnsi(iconColor)}${icon}${FG_RESET} ` : "";
-    const header = `${iconPrefix}${fgAnsi(HEX_TOOL.accent)}${toolTitle(this.toolName)}${FG_RESET}`;
+    const header = `${iconPrefix}${fgAnsi(HEX_TOOL.accent)}${toolHeaderTitle(this)}${FG_RESET}`;
     // `theme.bg()` returns `<bg-ansi><text>\x1b[49m`, so an empty probe carries
     // the same background prefix a rendered box row would.
     const barBg = boxLines
@@ -2782,9 +2858,9 @@ function patchToolCallFraming(): void {
       // A renderer-less tool with a document body earns its frame even when pi
       // drew a single row: its pending fallback is one bare name row, and the
       // one-line bullet would hide the args line omp's call view shows.
-      const jsonBody = renderJsonToolBody(this, width);
+      const defaultBody = renderDefaultToolBody(this, width);
       framed =
-        jsonBody !== undefined ||
+        defaultBody !== undefined ||
         last - first !== 1 ||
         glyphs().tool[this.toolName] !== undefined ||
         this.result?.isError === true ||
@@ -2801,7 +2877,7 @@ function patchToolCallFraming(): void {
         // A renderer-less tool's body is rebuilt as omp's document view, args
         // included — hoisting pi's call row would put the raw args JSON in the
         // header the rebuild just cleaned up.
-        if (target && !jsonBody) {
+        if (target && !defaultBody) {
           let rest = first + 1;
           while (rest < last && isBlankRenderedLine(rawCall[rest])) rest++;
           if (rest < last) {
@@ -2835,7 +2911,7 @@ function patchToolCallFraming(): void {
         // must not push that text behind the marker, so failure renders uncapped.
         const diffUncapped = this.expanded || this.result?.isError === true;
         const treatedBody =
-          jsonBody ??
+          defaultBody ??
           (bodyStart !== first ? renderContentBody(profile, this, width) : undefined) ??
           (bodyLooksLikeDiff(body())
             ? renderDiffBody(body(), diffUncapped, this.isPartial, profileLanguage(profile, this.args))
@@ -3051,6 +3127,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     resultPreviewCache.clear();
     outputTailCache.clear();
     jsonTreeCache.clear();
+    textWindowCache.clear();
   });
 }
 
