@@ -1270,6 +1270,12 @@ interface ToolProfile {
    * live tail while streaming, the first lines once settled — instead of
    * keeping pi's head-10 window. */
   content?(args: ToolArgs): string | undefined;
+  /** Readable output in this tool's result. A one-line tool that says so gets
+   * omp's collapsed content cell under its row — the first lines, gutted and
+   * highlighted, closed with `… N more lines` — where pi shows nothing. */
+  resultText?(result: unknown): string | undefined;
+  /** First line number of that output, for the preview gutter (read's `offset`). */
+  startLine?(args: ToolArgs): number;
   /** Call-side detail for the dim `(a · b)` suffix that follows a command.
    * Built from `args` rather than parsed back out of the row being replaced, so
    * rewriting the row cannot silently drop something the tool wanted shown. */
@@ -1324,6 +1330,19 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
     },
   ],
   ["edit", { frameSelfRendered: true, summary: editDiffSummary, contentPath: pathFromArgs }],
+  // pi renders a collapsed read as its call row alone; omp's read entries hang
+  // a three-line cell of the file under the summary row.
+  [
+    "read",
+    {
+      contentPath: pathFromArgs,
+      resultText: toolResultText,
+      startLine: args => {
+        const offset = args.offset;
+        return typeof offset === "number" && Number.isFinite(offset) && offset >= 1 ? Math.floor(offset) : 1;
+      },
+    },
+  ],
   // pi-ask. One question puts itself in the header via the usual target hoist;
   // several need saying, since only the first would otherwise be visible.
   ["ask", { iconless: true, summary: askQuestionSummary }],
@@ -1921,6 +1940,53 @@ function renderContentBody(
   return rows;
 }
 
+/** omp's collapsed content-cell height (`PREVIEW_LIMITS.OUTPUT_COLLAPSED`). */
+const RESULT_PREVIEW_LINES = 3;
+
+const resultPreviewCache = new Map<string, string[]>();
+const RESULT_PREVIEW_CACHE_MAX = 16;
+
+/** omp's read entries stay one line but carry a small cell of the file under
+ * the summary — the first three lines, gutted and highlighted, closed with
+ * `… N more lines` (omp `read-tool-group.ts` `#addContentPreview`). Rebuilt
+ * from the tool result; a result that is absent, an error, or image-only
+ * leaves the plain one-liner. */
+function renderResultPreview(
+  profile: ToolProfile | undefined,
+  component: FramedToolComponent,
+  width: number,
+): readonly string[] | undefined {
+  if (profile?.resultText === undefined || component.expanded || component.result?.isError) return undefined;
+  const text = profile.resultText(component.result);
+  if (!text) return undefined;
+
+  const lang = profileLanguage(profile, component.args);
+  const startLine = profile.startLine?.(asToolArgs(component.args)) ?? 1;
+  // Three cells of indent tuck the cell under the one-liner's bullet label.
+  const innerWidth = Math.max(1, width - 3);
+  const key = `${lang} ${startLine} ${innerWidth} ${text}`;
+  const cached = resultPreviewCache.get(key);
+  if (cached !== undefined) return cached;
+  if (resultPreviewCache.size >= RESULT_PREVIEW_CACHE_MAX) resultPreviewCache.clear();
+
+  const lines = text.replace(/\t/g, "   ").split("\n");
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  if (lines.length === 0) return undefined;
+  const total = lines.length;
+  const visible = lines.slice(0, RESULT_PREVIEW_LINES);
+  let highlighted = lang ? highlightCode(visible.join("\n"), lang) : visible;
+  if (highlighted.length !== visible.length) highlighted = visible;
+  const gutterWidth = Math.max(CONTENT_GUTTER_MIN_WIDTH, String(startLine + total - 1).length);
+  const gutted = highlighted.map(
+    (line, index) => `${fgAnsi(HEX_TOOL.dim)}${String(startLine + index).padStart(gutterWidth)} ${FG_RESET}${line}`,
+  );
+  const rows = new Text(gutted.join("\n"), 0, 0).render(innerWidth).map(row => `   ${row}`);
+  if (total > RESULT_PREVIEW_LINES) rows.push(`   ${moreLinesMarker(total - RESULT_PREVIEW_LINES)}`);
+
+  resultPreviewCache.set(key, rows);
+  return rows;
+}
+
 /** Structural view of the patched component (the compiled class fields are public). */
 interface FramedToolComponent {
   render: (width: number) => string[];
@@ -2181,6 +2247,8 @@ function patchToolCallFraming(): void {
         }
       } else {
         lines.push(renderToolOneLine(rawCall[first], this.toolName));
+        const preview = renderResultPreview(profile, this, width);
+        if (preview) lines.push(...preview);
       }
     }
     for (let i = 0; i < this.imageComponents.length; i++) {
@@ -2378,6 +2446,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     bashHighlightCache.clear();
     contextHighlightCache.clear();
     contentPreviewCache.clear();
+    resultPreviewCache.clear();
   });
 }
 
