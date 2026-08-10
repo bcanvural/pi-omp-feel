@@ -797,9 +797,9 @@ const DEGRADED_ASSUMPTIONS: Record<DegradedSubsystem, string[]> = {
   "tool-framing": [
     "`ToolExecutionComponent.prototype.render` can be patched, because the extension loader resolves `@earendil-works/pi-coding-agent` to the same module instance pi core imports.",
     "Instance members read: `hideComponent`, `hasRendererDefinition()`, `getRenderShell()`, `contentBox.render()`, `contentBox.bgFn()`, `contentText.render()`, `selfRenderContainer.render()`, `callRendererComponent`, `resultRendererComponent`, `args`, `imageComponents`, `imageSpacers`, `isPartial`, `executionStarted`, `expanded`, `result.isError`, `result.content`, `toolName`.",
-    "`expanded` is the component's Ctrl+O toggle, `false` while collapsed; `result.content` is the tool result's block list, whose `text` blocks carry the output the collapsed previews rebuild from.",
+    "`expanded` is the component's Ctrl+O toggle, `false` while collapsed; `result.content` is the tool result's block list, whose `text` blocks carry the output the collapsed previews rebuild from; `result.details.fullOutputPath` names bash's persisted-output file, mirrored when stripping its footer.",
     "pi's diff rows parse as `([+-\\s])(\\s*\\d+) content` (see `parseDiffLine` in pi's `diff.ts`), each wrapped whole in one `toolDiff*` foreground; hunk gaps render as digitless `...` rows. Tabs are flattened to spaces before rendering, so indentation glyphs can only ever be `·`.",
-    "pi's collapsed bash output is a visual-line tail introduced by a muted `... (N earlier lines, … to expand)` row, followed by an optional `[...]` warning row and a `Took …`/`Elapsed …` timing row (see `rebuildBashResultRenderComponent`).",
+    "pi's collapsed bash output is a visual-line tail whose window row (`... (N earlier lines, … to expand)`) renders first, with every output row — wrapped continuations included — opening with the same `toolOutput` foreground, and the warning/timing rows that follow opening with their own (see `rebuildBashResultRenderComponent`; `fullOutputPath` in `result.details` names the footer to strip).",
     "`edit` declares `renderShell: \"self\"` and builds its own shell as a background-tinted `Box`, so `selfRenderContainer` yields rows this can frame (see `frameSelfRendered`). Its diff rows are `+123 `/`-123 `/` 123 `-prefixed, which is what the `⟨+N/-M⟩` badge counts.",
     "`contentBox` is a pi-tui `Box` with paddingX 1, so it renders children at `width - 2`. The section path (see `TOOL_PROFILES`) therefore skips it entirely (rendering those same children only at `width - 4`) and takes the background tint from `contentBox.bgFn(\"\")` instead — rendering both would thrash the children's single-width caches.",
     "Rows from a background-tinted `Box` start with an SGR background sequence and end with `ESC[49m` (see `addSideBorders`).",
@@ -1341,7 +1341,7 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
     "read",
     {
       contentPath: pathFromArgs,
-      resultText: toolResultText,
+      resultText: result => toolResultText(result)?.replace(READ_NOTICE_TAIL, ""),
       startLine: args => {
         const offset = args.offset;
         return typeof offset === "number" && Number.isFinite(offset) && offset >= 1 ? Math.floor(offset) : 1;
@@ -1407,6 +1407,13 @@ function toolTitle(toolName: string): string {
 function asToolArgs(args: unknown): ToolArgs {
   return typeof args === "object" && args !== null ? (args as ToolArgs) : {};
 }
+
+/** pi's read appends a model-facing notice into the result text itself —
+ * `[Showing lines X-Y of Z. Use offset=N to continue.]` or `[N more lines in
+ * file. …]` (its read.js) — which is not file content and must be neither
+ * counted nor previewed. Wording-matched to those two shapes; a mismatch
+ * merely counts the notice as content again, which is cosmetic. */
+const READ_NOTICE_TAIL = /\n\n\[(?:Showing lines \d|\d+ more lines in file)[^\n]*\]$/;
 
 /** pi's file tools accept both spellings (`file_path ?? path`, see its
  * read/write/edit renderers); the same tool never sends both. */
@@ -1646,13 +1653,18 @@ const PREVIEW_WINDOW_RESERVED_ROWS = 20;
 const PREVIEW_WINDOW_MIN_LINES = 6;
 const PREVIEW_WINDOW_FALLBACK_ROWS = 30;
 
+/** The window height rides in the frame memo key in 10 bits, and the depth
+ * the previews actually use must never outrun what the memo can see — a
+ * taller terminal would stop invalidating on vertical resize. omp's helper is
+ * unbounded; a 1043-row terminal is where this one stops caring. */
+const PREVIEW_WINDOW_MAX_LINES = 1023;
+
 /** omp's `previewWindowRows`: terminal rows minus a reserve for the rest of the
  * block and the editor below it, floored so a tiny terminal still shows some. */
 function previewWindowRows(): number {
   const rows = process.stdout.rows || PREVIEW_WINDOW_FALLBACK_ROWS;
-  return Math.max(PREVIEW_WINDOW_MIN_LINES, rows - PREVIEW_WINDOW_RESERVED_ROWS);
+  return Math.min(PREVIEW_WINDOW_MAX_LINES, Math.max(PREVIEW_WINDOW_MIN_LINES, rows - PREVIEW_WINDOW_RESERVED_ROWS));
 }
-
 function dimRow(text: string): string {
   return `${fgAnsi(HEX_TOOL.dim)}${text}${FG_RESET}`;
 }
@@ -1672,16 +1684,48 @@ function moreLinesMarker(hidden: number): string {
   return dimRow(`… ${hidden} more line${hidden === 1 ? "" : "s"} ${EXPAND_HINT}`);
 }
 
-/** The text blocks of a tool result, joined — where pi keeps what a tool
- * printed. Nothing for image-only or absent results, so callers fall back to
- * the rows pi already drew. */
+// pi renders tool output through `getTextOutput`, which sanitizes every text
+// block before it can reach a row. Result *content* is raw — bash appends
+// child output verbatim, read stores file bytes — so anything rebuilt from it
+// must apply the same chain, or a `grep --color=always` bleeds over the frame
+// and a control byte throws inside render and burns the fail-once latch on
+// ordinary data. Both patterns mirror pi's exactly (`utils/ansi.js`
+// `ansiRegex` — broader than `ANSI_SEQ` above: colon params, `~` finals, the
+// 0x9C terminator — and `utils/shell.js` `sanitizeBinaryOutput`).
+const OUTPUT_ANSI_SEQ = new RegExp(
+  "(?:\\u001B\\][\\s\\S]*?(?:\\u0007|\\u001B\\u005C|\\u009C))" +
+    "|[\\u001B\\u009B][[\\]()#;?]*(?:\\d{1,4}(?:[;:]\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]",
+  "g",
+);
+
+/** pi's per-block chain: strip ANSI whole, drop the control bytes that crash
+ * string-width (keeping `\t` `\n` `\r`, like pi), then drop `\r` separately. */
+function sanitizeOutputBlock(text: string): string {
+  const stripped =
+    text.includes("\u001b") || text.includes("\u009b") ? text.replace(OUTPUT_ANSI_SEQ, "") : text;
+  return Array.from(stripped)
+    .filter(char => {
+      const code = char.codePointAt(0);
+      if (code === undefined) return false;
+      if (code === 0x09 || code === 0x0a || code === 0x0d) return true;
+      if (code <= 0x1f) return false;
+      if (code >= 0xfff9 && code <= 0xfffb) return false;
+      return true;
+    })
+    .join("")
+    .replace(/\r/g, "");
+}
+
+/** The text blocks of a tool result, joined and sanitized — where pi keeps
+ * what a tool printed, in the shape pi would render it. Nothing for
+ * image-only or absent results, so callers fall back to the rows pi drew. */
 function toolResultText(result: unknown): string | undefined {
   const content = (result as { content?: unknown } | undefined)?.content;
   if (!Array.isArray(content)) return undefined;
   const texts: string[] = [];
   for (const block of content) {
     const candidate = block as { type?: unknown; text?: unknown } | null;
-    if (candidate?.type === "text" && typeof candidate.text === "string") texts.push(candidate.text);
+    if (candidate?.type === "text" && typeof candidate.text === "string") texts.push(sanitizeOutputBlock(candidate.text));
   }
   return texts.length > 0 ? texts.join("\n") : undefined;
 }
@@ -1739,6 +1783,8 @@ function bodyLooksLikeDiff(stripped: readonly StrippedRow[]): boolean {
 /** omp's collapsed-diff budget (`PREVIEW_LIMITS.DIFF_COLLAPSED_*`). */
 const DIFF_COLLAPSED_HUNKS = 8;
 const DIFF_COLLAPSED_LINES = 40;
+/** omp's streaming-diff window (`EDIT_STREAMING_PREVIEW_LINES`). */
+const DIFF_STREAMING_PREVIEW_LINES = 12;
 
 interface DiffBodyRow {
   line: string;
@@ -1760,38 +1806,114 @@ function countDiffHunks(rows: readonly DiffBodyRow[]): number {
   return hunks;
 }
 
-/** omp's `truncateDiffByHunk`: a collapsed diff keeps 8 hunks / 40 rows. While
- * it is still streaming the window tracks the tail so the newest hunks stay
- * visible (omp's `fromTail`); settled, it keeps the head. Reversing the rows
- * reuses the head walk for the tail case, exactly as omp does. */
-function capDiffRows(
-  rows: DiffBodyRow[],
-  fromTail: boolean,
-): { kept: DiffBodyRow[]; hiddenLines: number; hiddenHunks: number } {
-  if (rows.length <= DIFF_COLLAPSED_LINES && countDiffHunks(rows) <= DIFF_COLLAPSED_HUNKS) {
+interface DiffSegment {
+  kind: "change" | "context" | "ellipsis" | "other";
+  rows: DiffBodyRow[];
+}
+
+/** omp's `parseDiffSegments`: maximal runs of change and context rows, with
+ * gap markers and blank rows flushed into singleton "ellipsis" segments.
+ * "other" rows (error text, wrapped continuations) have no omp equivalent —
+ * they run together and are never thinned below. */
+function segmentDiffRows(rows: readonly DiffBodyRow[]): DiffSegment[] {
+  const segments: DiffSegment[] = [];
+  for (const row of rows) {
+    const kind: DiffSegment["kind"] =
+      row.kind === "added" || row.kind === "removed"
+        ? "change"
+        : row.kind === "gap" || row.plain.length === 0
+          ? "ellipsis"
+          : row.kind === "context"
+            ? "context"
+            : "other";
+    const current = segments[segments.length - 1];
+    if (current && current.kind === kind && kind !== "ellipsis") current.rows.push(row);
+    else segments.push({ kind, rows: [row] });
+  }
+  return segments;
+}
+
+/** The gap row inserted where a sandwiched context run was thinned — omp
+ * pushes a bare blank line there; inside a frame that reads as a hole, so
+ * this renders as pi's dim gap idiom instead. */
+const DIFF_THINNED_GAP_ROW: DiffBodyRow = { line: `${fgAnsi(HEX_TOOL.dim)}…${FG_RESET}`, plain: "…", kind: "gap" };
+
+/** omp's `truncateDiffByHunk` (its render-utils), both regimes, for the
+ * settled collapsed view. When the change lines alone bust the line budget,
+ * whole segments are kept until a budget trips — overshooting by up to a
+ * segment, as omp does. Otherwise every hunk up to the cap stays visible and
+ * the context BETWEEN hunks is thinned proportionally: the lines nearest a
+ * hunk survive, and a run sandwiched between two hunks splits around a gap
+ * row. Like omp, the thinning regime only ever stops early on the hunk cap;
+ * the line budget is approximated by the ratio. */
+function capDiffRows(rows: DiffBodyRow[]): { kept: DiffBodyRow[]; hiddenLines: number; hiddenHunks: number } {
+  const totalHunks = countDiffHunks(rows);
+  if (rows.length <= DIFF_COLLAPSED_LINES && totalHunks <= DIFF_COLLAPSED_HUNKS) {
     return { kept: rows, hiddenLines: 0, hiddenHunks: 0 };
   }
-  if (fromTail) {
-    const reversed = capDiffRows([...rows].reverse(), false);
-    return { ...reversed, kept: reversed.kept.reverse() };
-  }
+  const segments = segmentDiffRows(rows);
+  const changeLineCount = segments.reduce((sum, s) => (s.kind === "change" ? sum + s.rows.length : sum), 0);
   const kept: DiffBodyRow[] = [];
   let keptHunks = 0;
-  let inHunk = false;
-  for (const row of rows) {
-    const isChange = row.kind === "added" || row.kind === "removed";
-    if (isChange && !inHunk) {
-      keptHunks++;
-      if (keptHunks > DIFF_COLLAPSED_HUNKS) break;
+
+  if (changeLineCount > DIFF_COLLAPSED_LINES) {
+    for (const segment of segments) {
+      if (segment.kind === "change") {
+        keptHunks++;
+        if (keptHunks > DIFF_COLLAPSED_HUNKS) break;
+      }
+      kept.push(...segment.rows);
+      if (kept.length >= DIFF_COLLAPSED_LINES) break;
     }
-    inHunk = isChange;
-    kept.push(row);
-    if (kept.length >= DIFF_COLLAPSED_LINES) break;
+  } else {
+    const totalContextLines = segments.reduce((sum, s) => (s.kind === "context" ? sum + s.rows.length : sum), 0);
+    const contextBudget = DIFF_COLLAPSED_LINES - changeLineCount;
+    const thinning = totalContextLines > contextBudget;
+    const contextRatio = totalContextLines > 0 ? contextBudget / totalContextLines : 0;
+    walk: for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
+      switch (segment.kind) {
+        case "change":
+          keptHunks++;
+          if (keptHunks > DIFF_COLLAPSED_HUNKS) break walk;
+          kept.push(...segment.rows);
+          break;
+        case "context": {
+          if (!thinning) {
+            kept.push(...segment.rows);
+            break;
+          }
+          const allowed = Math.max(1, Math.floor(segment.rows.length * contextRatio));
+          // omp keys the direction off the immediate neighbours — an ellipsis
+          // in between deliberately breaks the adjacency, exactly as there.
+          const beforeChange = segments[i + 1]?.kind === "change";
+          const afterChange = segments[i - 1]?.kind === "change";
+          if (beforeChange && afterChange) {
+            if (segment.rows.length > allowed) {
+              const half = Math.ceil(allowed / 2);
+              kept.push(...segment.rows.slice(0, half), DIFF_THINNED_GAP_ROW, ...segment.rows.slice(-half));
+            } else {
+              kept.push(...segment.rows);
+            }
+          } else if (beforeChange) {
+            kept.push(...segment.rows.slice(-allowed));
+          } else if (afterChange) {
+            kept.push(...segment.rows.slice(0, allowed));
+          } else {
+            kept.push(...segment.rows.slice(0, Math.min(allowed, 2)));
+          }
+          break;
+        }
+        default:
+          kept.push(...segment.rows);
+          break;
+      }
+    }
   }
   return {
     kept,
-    hiddenLines: rows.length - kept.length,
-    hiddenHunks: countDiffHunks(rows) - countDiffHunks(kept),
+    hiddenLines: Math.max(0, rows.length - kept.length),
+    hiddenHunks: Math.max(0, totalHunks - countDiffHunks(kept)),
   };
 }
 
@@ -1843,17 +1965,33 @@ function renderDiffBody(
   lang: string | undefined,
 ): readonly string[] {
   const classified = stripped.map(({ line, plain }) => ({ line, plain, kind: classifyDiffRow(plain) }));
-  const { kept, hiddenLines, hiddenHunks } = expanded
-    ? { kept: classified, hiddenLines: 0, hiddenHunks: 0 }
-    : capDiffRows(classified, streaming);
+  let kept = classified;
+  let hiddenLines = 0;
+  let hiddenHunks = 0;
+  if (streaming) {
+    // omp streams a "cursor" tail window of visual rows — `formatStreamingDiff`
+    // in its edit renderer — with no hunk cap, 12 rows collapsed and the
+    // viewport expanded; the hunk budget only applies once the diff settles.
+    // The settle therefore jumps the window from tail to head, as omp's does.
+    const budget = expanded ? previewWindowRows() : Math.min(DIFF_STREAMING_PREVIEW_LINES, previewWindowRows());
+    if (classified.length > budget) {
+      kept = classified.slice(-budget);
+      hiddenLines = classified.length - kept.length;
+      hiddenHunks = countDiffHunks(classified) - countDiffHunks(kept);
+    }
+  } else if (!expanded) {
+    ({ kept, hiddenLines, hiddenHunks } = capDiffRows(classified));
+  }
 
   const out: string[] = [];
-  const hunksNote = hiddenHunks > 0 ? ` (${hiddenHunks} hunk${hiddenHunks === 1 ? "" : "s"})` : "";
-  // A tail window hides its head, so its marker leads; a head window trails.
-  // The streaming marker matches omp's write-cell wording and drops the expand
-  // hint — mid-stream the window moves on its own.
-  if (hiddenLines > 0 && streaming) {
-    out.push(dimRow(`… (${hiddenLines} earlier line${hiddenLines === 1 ? "" : "s"}${hunksNote})`));
+  // omp's markers, byte for byte, unconditional plural included: streaming, a
+  // dim `… (2 more hunks, 13 more lines above)` leads the tail; settled, the
+  // same remainder trails the head in `toolOutput` with the expand hint.
+  const remainder: string[] = [];
+  if (hiddenHunks > 0) remainder.push(`${hiddenHunks} more hunks`);
+  if (hiddenLines > 0) remainder.push(`${hiddenLines} more lines`);
+  if (remainder.length > 0 && streaming) {
+    out.push(dimRow(`… (${remainder.join(", ")} above)`));
   }
   let index = 0;
   while (index < kept.length) {
@@ -1870,8 +2008,8 @@ function renderDiffBody(
     else out.push(row.line);
     index++;
   }
-  if (hiddenLines > 0 && !streaming) {
-    out.push(dimRow(`… ${hiddenLines} more line${hiddenLines === 1 ? "" : "s"}${hunksNote} ${EXPAND_HINT}`));
+  if (remainder.length > 0 && !streaming) {
+    out.push(`${fgAnsi(HEX.overlay1)}… (${remainder.join(", ")})${FG_RESET} ${dimRow(EXPAND_HINT)}`);
   }
   return out;
 }
@@ -1952,31 +2090,48 @@ const outputTailCache = new Map<string, string[]>();
 const OUTPUT_TAIL_CACHE_MAX = 16;
 
 const OUTPUT_HINT_ROW = /^\.\.\. \(\d+ earlier lines?,/;
-const OUTPUT_WARNING_ROW = /^\[.*\]$/;
-const OUTPUT_TIMING_ROW = /^(?:Took|Elapsed)\s/;
+const OUTPUT_ROW_FG = /^\x1b\[38;(?:2|5);[0-9;]*m/;
 
 /** Rebuild pi's collapsed output window at omp's depth. pi keeps 5 visual
  * lines behind a muted `... (N earlier lines, …)` row; omp keeps a
  * viewport-capped 10. The full output still lives in the result, so the
- * deeper tail is re-derived from it and swapped in over pi's window — the
- * rows around it (timing, truncation warnings) stay put, and any shape
- * surprise leaves pi's rows exactly as drawn. */
+ * deeper tail is re-derived from it and swapped in over pi's window.
+ *
+ * The replaced span is delimited by COLOR, not shape: pi wraps every output
+ * line — and, via pi-tui's SGR tracking, every wrapped continuation row — in
+ * the same `toolOutput` foreground, while the truncation warning and timing
+ * rows that follow carry their own. Walking rows while they open with the
+ * output foreground therefore survives what a shape walk could not: the
+ * warning row wrapping into fragments that individually look like nothing.
+ * Output that merely *prints* warning- or timing-shaped text is output-
+ * colored, stays inside the span, and is replaced by the rebuilt tail — so
+ * it renders exactly once. (A theme whose warning color equals `toolOutput`
+ * would fold the warning into the span; degenerate, and the cost is a
+ * missing warning row behind an accurate marker.)
+ *
+ * Everything here fails toward pi's rows: no window row at index 0, no
+ * extractable foreground, no result text — untouched, pi's 5-line look. */
 function retailOutputRows(
   rawResult: readonly string[],
   profile: ToolProfile,
   component: FramedToolComponent,
   width: number,
 ): readonly string[] {
-  // pi only draws the hint row when lines are hidden; without it the whole
-  // output is already visible and there is nothing to deepen.
-  let hintIndex = -1;
-  for (let i = 0; i < rawResult.length; i++) {
-    if (OUTPUT_HINT_ROW.test(stripAnsi(rawResult[i]).trim())) {
-      hintIndex = i;
-      break;
-    }
-  }
-  if (hintIndex === -1) return rawResult;
+  // pi's preview child is the result container's first child and
+  // `renderToolPart` trims its leading blank, so a real window row is always
+  // row 0 — the same text anywhere else is output that happens to look like
+  // one, and rebuilding there would duplicate the rows before it. pi also
+  // only draws the row when lines are hidden; without it the whole output is
+  // already visible and there is nothing to deepen.
+  if (rawResult.length < 2 || !OUTPUT_HINT_ROW.test(stripAnsi(rawResult[0]).trim())) return rawResult;
+
+  // The output's own foreground, read off the first row pi drew with it. A
+  // theme that leaves `toolOutput` colorless makes the span undetectable —
+  // bail to pi's rows rather than guess.
+  const outFg = OUTPUT_ROW_FG.exec(rawResult[1])?.[0];
+  if (!outFg) return rawResult;
+  let end = 2;
+  while (end < rawResult.length && rawResult[end].startsWith(outFg)) end++;
 
   const text = profile.output?.(component.result);
   if (!text) return rawResult;
@@ -1995,16 +2150,6 @@ function retailOutputRows(
   }
   if (!output) return rawResult;
 
-  // The replaced span runs from the hint row to the trailing timing and
-  // warning rows, which belong to other parts of pi's layout.
-  const plainAt = (i: number): string => stripAnsi(rawResult[i]).trim();
-  let end = rawResult.length;
-  while (end > hintIndex + 1 && plainAt(end - 1).length === 0) end--;
-  if (end > hintIndex + 1 && OUTPUT_TIMING_ROW.test(plainAt(end - 1))) end--;
-  if (end > hintIndex + 1 && OUTPUT_WARNING_ROW.test(plainAt(end - 1))) end--;
-
-  // The tail keeps the colour pi gave it — read off the first row it drew.
-  const outFg = rawResult[hintIndex + 1]?.match(/\x1b\[38;(?:2|5);[0-9;]*m/)?.[0] ?? fgAnsi(HEX.overlay1);
   const innerWidth = Math.max(1, width - 4);
   const budget = Math.min(OUTPUT_TAIL_LINES, previewWindowRows());
   const key = `${outFg} ${innerWidth} ${budget} ${output}`;
@@ -2017,10 +2162,22 @@ function retailOutputRows(
       .join("\n");
     const visual = new Text(styled, 0, 0).render(innerWidth);
     const kept = visual.slice(-budget);
-    tail = kept.length < visual.length ? [earlierLinesMarker(visual.length - kept.length), ...kept] : kept;
+    // omp's bash window marker, byte for byte — counts are visual rows and
+    // the plural is unconditional, exactly as its bash.ts writes them. The
+    // parenthesized lowercase hint is omp's own inconsistency with its
+    // `⟨ctrl+o: Expand⟩` style elsewhere, kept for capture parity.
+    tail =
+      kept.length < visual.length
+        ? [
+            dimRow(
+              `… (${visual.length - kept.length} earlier lines, showing ${kept.length} of ${visual.length}) (ctrl+o to expand)`,
+            ),
+            ...kept,
+          ]
+        : kept;
     outputTailCache.set(key, tail);
   }
-  return [...rawResult.slice(0, hintIndex), ...tail, ...rawResult.slice(end)];
+  return [...tail, ...rawResult.slice(end)];
 }
 
 /** omp's collapsed content-cell height (`PREVIEW_LIMITS.OUTPUT_COLLAPSED`). */
@@ -2059,12 +2216,17 @@ function renderResultPreview(
   const visible = lines.slice(0, RESULT_PREVIEW_LINES);
   let highlighted = lang ? highlightCode(visible.join("\n"), lang) : visible;
   if (highlighted.length !== visible.length) highlighted = visible;
-  const gutterWidth = Math.max(CONTENT_GUTTER_MIN_WIDTH, String(startLine + total - 1).length);
+  // omp's code cell sizes its gutter to the largest VISIBLE number, floor 2
+  // (`code-cell.ts`) — narrower than the write cell's floor of 3.
+  const gutterWidth = Math.max(2, String(startLine + visible.length - 1).length);
   const gutted = highlighted.map(
     (line, index) => `${fgAnsi(HEX_TOOL.dim)}${String(startLine + index).padStart(gutterWidth)} ${FG_RESET}${line}`,
   );
   const rows = new Text(gutted.join("\n"), 0, 0).render(innerWidth).map(row => `   ${row}`);
-  if (total > RESULT_PREVIEW_LINES) rows.push(`   ${moreLinesMarker(total - RESULT_PREVIEW_LINES)}`);
+  // omp tucks the more-marker under the numbers with a gutter-width pad.
+  if (total > RESULT_PREVIEW_LINES) {
+    rows.push(`   ${" ".repeat(gutterWidth + 1)}${moreLinesMarker(total - RESULT_PREVIEW_LINES)}`);
+  }
 
   resultPreviewCache.set(key, rows);
   return rows;
@@ -2192,8 +2354,9 @@ function patchToolCallFraming(): void {
       (this.expanded ? 8 : 0) |
       // Collapsed previews are sized from the terminal height, and a
       // vertical-only resize changes no other memo key, so the window rides
-      // along in the high bits.
-      (Math.min(previewWindowRows(), 63) << 4);
+      // along in the high bits — already clamped to 8 bits at the source, so
+      // the memoed value and the used depth cannot diverge.
+      (previewWindowRows() << 4);
     const memo = frameMemo.get(this);
     if (
       memo &&
@@ -2319,10 +2482,13 @@ function patchToolCallFraming(): void {
         // change row, which file content shown by other tools can in principle
         // contain — the cost there is a stray indent glyph, the same
         // cheap-to-be-wrong trade the badge makes.
+        // A failed edit appends its error text after the diff rows; the cap
+        // must not push that text behind the marker, so failure renders uncapped.
+        const diffUncapped = this.expanded || this.result?.isError === true;
         const treatedBody =
           (bodyStart !== first ? renderContentBody(profile, this, width) : undefined) ??
           (bodyLooksLikeDiff(body())
-            ? renderDiffBody(body(), this.expanded, this.isPartial, profileLanguage(profile, this.args))
+            ? renderDiffBody(body(), diffUncapped, this.isPartial, profileLanguage(profile, this.args))
             : undefined);
         if (treatedBody) {
           for (const row of treatedBody) lines.push(frameBodyRow(row, width, borderColor, barBg));
