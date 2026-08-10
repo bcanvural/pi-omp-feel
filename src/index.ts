@@ -1,4 +1,4 @@
-import { CustomEditor, getAgentDir, highlightCode, ToolExecutionComponent, VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, getAgentDir, getLanguageFromPath, highlightCode, ToolExecutionComponent, VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -6,7 +6,7 @@ import type {
   ReadonlyFooterDataProvider,
 } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem, EditorTheme, TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
@@ -796,7 +796,10 @@ const DEGRADED_LABEL: Record<DegradedSubsystem, string> = {
 const DEGRADED_ASSUMPTIONS: Record<DegradedSubsystem, string[]> = {
   "tool-framing": [
     "`ToolExecutionComponent.prototype.render` can be patched, because the extension loader resolves `@earendil-works/pi-coding-agent` to the same module instance pi core imports.",
-    "Instance members read: `hideComponent`, `hasRendererDefinition()`, `getRenderShell()`, `contentBox.render()`, `contentBox.bgFn()`, `contentText.render()`, `selfRenderContainer.render()`, `callRendererComponent`, `resultRendererComponent`, `args`, `imageComponents`, `imageSpacers`, `isPartial`, `executionStarted`, `result.isError`, `toolName`.",
+    "Instance members read: `hideComponent`, `hasRendererDefinition()`, `getRenderShell()`, `contentBox.render()`, `contentBox.bgFn()`, `contentText.render()`, `selfRenderContainer.render()`, `callRendererComponent`, `resultRendererComponent`, `args`, `imageComponents`, `imageSpacers`, `isPartial`, `executionStarted`, `expanded`, `result.isError`, `result.content`, `toolName`.",
+    "`expanded` is the component's Ctrl+O toggle, `false` while collapsed; `result.content` is the tool result's block list, whose `text` blocks carry the output the collapsed previews rebuild from.",
+    "pi's diff rows parse as `([+-\\s])(\\s*\\d+) content` (see `parseDiffLine` in pi's `diff.ts`), each wrapped whole in one `toolDiff*` foreground; hunk gaps render as digitless `...` rows. Tabs are flattened to spaces before rendering, so indentation glyphs can only ever be `·`.",
+    "pi's collapsed bash output is a visual-line tail introduced by a muted `... (N earlier lines, … to expand)` row, followed by an optional `[...]` warning row and a `Took …`/`Elapsed …` timing row (see `rebuildBashResultRenderComponent`).",
     "`edit` declares `renderShell: \"self\"` and builds its own shell as a background-tinted `Box`, so `selfRenderContainer` yields rows this can frame (see `frameSelfRendered`). Its diff rows are `+123 `/`-123 `/` 123 `-prefixed, which is what the `⟨+N/-M⟩` badge counts.",
     "`contentBox` is a pi-tui `Box` with paddingX 1, so it renders children at `width - 2`. The section path (see `TOOL_PROFILES`) therefore skips it entirely (rendering those same children only at `width - 4`) and takes the background tint from `contentBox.bgFn(\"\")` instead — rendering both would thrash the children's single-width caches.",
     "Rows from a background-tinted `Box` start with an SGR background sequence and end with `ESC[49m` (see `addSideBorders`).",
@@ -1568,6 +1571,60 @@ function runbgWall(rows: readonly StrippedRow[], args: ToolArgs): readonly strin
   return rows.map((row, index) => (index === last ? replaced : row.line));
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Collapsed previews
+//
+// omp sizes its collapsed tool previews from the live viewport and closes them
+// with dim `… N … lines ⟨ctrl+o: Expand⟩` markers (`tools/render-utils.ts`:
+// `previewWindowRows`, `capPreviewLines`, `formatMoreItems`, `formatExpandHint`).
+// pi's renderers use fixed budgets and their own marker wording; the helpers
+// here carry omp's shapes for the rebuilds below.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PREVIEW_WINDOW_RESERVED_ROWS = 20;
+const PREVIEW_WINDOW_MIN_LINES = 6;
+const PREVIEW_WINDOW_FALLBACK_ROWS = 30;
+
+/** omp's `previewWindowRows`: terminal rows minus a reserve for the rest of the
+ * block and the editor below it, floored so a tiny terminal still shows some. */
+function previewWindowRows(): number {
+  const rows = process.stdout.rows || PREVIEW_WINDOW_FALLBACK_ROWS;
+  return Math.max(PREVIEW_WINDOW_MIN_LINES, rows - PREVIEW_WINDOW_RESERVED_ROWS);
+}
+
+function dimRow(text: string): string {
+  return `${fgAnsi(HEX_TOOL.dim)}${text}${FG_RESET}`;
+}
+
+/** omp resolves this hint from its live keybindings; pi offers extensions no
+ * accessor for the expand binding, so this carries pi's default, in the same
+ * lowercase style as the working indicator's `⟨esc⟩`. */
+const EXPAND_HINT = "⟨ctrl+o: Expand⟩";
+
+/** omp's `capPreviewLines` marker: a tail window hides its head. */
+function earlierLinesMarker(hidden: number): string {
+  return dimRow(`… ${hidden} earlier line${hidden === 1 ? "" : "s"} ${EXPAND_HINT}`);
+}
+
+/** omp's `formatMoreItems` + expand hint: a head window hides its tail. */
+function moreLinesMarker(hidden: number): string {
+  return dimRow(`… ${hidden} more line${hidden === 1 ? "" : "s"} ${EXPAND_HINT}`);
+}
+
+/** The text blocks of a tool result, joined — where pi keeps what a tool
+ * printed. Nothing for image-only or absent results, so callers fall back to
+ * the rows pi already drew. */
+function toolResultText(result: unknown): string | undefined {
+  const content = (result as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content)) return undefined;
+  const texts: string[] = [];
+  for (const block of content) {
+    const candidate = block as { type?: unknown; text?: unknown } | null;
+    if (candidate?.type === "text" && typeof candidate.text === "string") texts.push(candidate.text);
+  }
+  return texts.length > 0 ? texts.join("\n") : undefined;
+}
+
 /** Structural view of the patched component (the compiled class fields are public). */
 interface FramedToolComponent {
   render: (width: number) => string[];
@@ -1587,7 +1644,9 @@ interface FramedToolComponent {
   imageSpacers: { render(width: number): string[] }[];
   isPartial: boolean;
   executionStarted: boolean;
-  result?: { isError?: boolean };
+  /** `expanded` is pi's Ctrl+O toggle; the collapsed previews below key off it. */
+  expanded: boolean;
+  result?: { isError?: boolean; content?: unknown };
   toolName: string;
 }
 
@@ -1682,7 +1741,14 @@ function patchToolCallFraming(): void {
     // replaces cost ~24us per frame across 500 blocks. `toolName` needs no
     // comparing — the memo is keyed on the component, which never changes tool.
     const flags =
-      (this.isPartial ? 1 : 0) | (this.executionStarted ? 2 : 0) | (this.result?.isError ? 4 : 0);
+      (this.isPartial ? 1 : 0) |
+      (this.executionStarted ? 2 : 0) |
+      (this.result?.isError ? 4 : 0) |
+      (this.expanded ? 8 : 0) |
+      // Collapsed previews are sized from the terminal height, and a
+      // vertical-only resize changes no other memo key, so the window rides
+      // along in the high bits.
+      (Math.min(previewWindowRows(), 63) << 4);
     const memo = frameMemo.get(this);
     if (
       memo &&
@@ -1827,10 +1893,10 @@ function patchToolCallFraming(): void {
         width,
         toolName: safeProbe(() => String(this.toolName)),
         renderShell: safeProbe(() => `${this.hasRendererDefinition()}/${this.getRenderShell()}`),
-        state: safeProbe(() => `partial=${this.isPartial} started=${this.executionStarted} error=${this.result?.isError}`),
+        state: safeProbe(() => `partial=${this.isPartial} started=${this.executionStarted} error=${this.result?.isError} expanded=${this.expanded}`),
         // Which of the fields the patch depends on are actually present.
         "members present": safeProbe(() =>
-          (["contentBox", "contentText", "callRendererComponent", "resultRendererComponent", "imageComponents", "imageSpacers", "args"] as const)
+          (["contentBox", "contentText", "callRendererComponent", "resultRendererComponent", "imageComponents", "imageSpacers", "args", "expanded", "result"] as const)
             .map(name => `${name}=${this[name] === undefined ? "missing" : "ok"}`)
             .join(" ")),
       });
