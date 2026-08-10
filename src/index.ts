@@ -1453,8 +1453,11 @@ function splitToolCallRow(contentLine: string, toolName: string): { title: strin
  * single row instead of a block: an uncoloured bullet, the label in `toolTitle`,
  * then the target in `accent`. Neither of omp's glyph presets defines a
  * `tool.read`/`tool.grep`/`tool.ls` entry, which is how it marks them out. */
-function renderToolOneLine(contentLine: string, toolName: string): string {
-  const { title, target } = splitToolCallRow(contentLine, toolName);
+function renderToolOneLine(contentLine: string, component: FramedToolComponent): string {
+  const { target } = splitToolCallRow(contentLine, component.toolName);
+  // Same name the frame would use: a tool that draws one row while pending
+  // and a block once it settles must not appear to be two different tools.
+  const title = toolHeaderTitle(component);
   const head = ` ${glyphs().status.bullet} ${fgAnsi(HEX.lavender)}${title}${FG_RESET}`;
   return target ? `${head} ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}` : head;
 }
@@ -2490,28 +2493,46 @@ const TEXT_WINDOW_LINES_EXPANDED = 12;
  * line of real output that happens to be bracketed is mistaken for one, which
  * costs it a colour and a place at the end — never its visibility. */
 const TRAILING_NOTICE_LINE = /^\[.*\]$/;
+/** A result worth trying to parse. Leading space is skipped here and by
+ * `JSON.parse` alike, so the window below keeps the text's own indentation. */
+const JSON_DOCUMENT_LEAD = /^\s*[{[]/;
+
+/** Rows that notice may occupy, however long it is. */
+const NOTICE_MAX_ROWS = 3;
 
 /** omp's raw-output window. Lines are clipped rather than wrapped, as omp
  * clips them, so the count in the marker is the count of real lines. */
 function buildTextWindowRows(text: string, expanded: boolean, innerWidth: number): string[] {
   const lines = text.replace(/\t/g, "   ").split("\n");
-  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  let end = lines.length;
+  while (end > 0 && lines[end - 1].trim() === "") end--;
+
   // Where a truncated result says where the whole of it went, that line
   // outlives the window — the path is the one thing a collapsed block must
-  // not swallow.
-  const notice =
-    lines.length > 1 && TRAILING_NOTICE_LINE.test(lines[lines.length - 1]) ? lines.pop() : undefined;
+  // not swallow. The blank line it was appended after leaves with it, or the
+  // marker would count an empty line as output held back.
+  let notice: string | undefined;
+  if (end > 1 && TRAILING_NOTICE_LINE.test(lines[end - 1])) {
+    notice = lines[end - 1];
+    end--;
+    while (end > 0 && lines[end - 1].trim() === "") end--;
+  }
 
   const max = expanded ? TEXT_WINDOW_LINES_EXPANDED : TEXT_WINDOW_LINES_COLLAPSED;
-  const shown = lines.slice(0, max);
+  const shown = lines.slice(0, Math.min(end, max));
   const rows = shown.map(line => `${fgAnsi(HEX.overlay1)}${clipPlain(line, innerWidth)}${FG_RESET}`);
-  const hidden = lines.length - shown.length;
+  const hidden = end - shown.length;
   if (hidden > 0) rows.push(moreLinesMarker(hidden));
   else if (!expanded) rows.push(dimRow(EXPAND_HINT));
-  // Wrapped, not clipped, unlike the output above it: this row exists to
-  // carry the path to the rest of the output, and a clipped path is no path.
   if (notice !== undefined) {
-    rows.push(...new Text(`${fgAnsi(HEX.yellow)}${notice}${FG_RESET}`, 0, 0).render(innerWidth));
+    // Wrapped, not clipped like the output above it: this line exists to
+    // carry the path to the rest of the output, and a clipped path is no
+    // path. Bounded all the same — a notice is only ever a notice by shape,
+    // and a bracketed line of any size must not outgrow the window it sits
+    // beneath.
+    const bounded = clipPlain(notice, innerWidth * NOTICE_MAX_ROWS);
+    const wrapped = new Text(`${fgAnsi(HEX.yellow)}${bounded}${FG_RESET}`, 0, 0).render(innerWidth);
+    rows.push(...wrapped.slice(0, NOTICE_MAX_ROWS));
   }
   return rows;
 }
@@ -2522,13 +2543,9 @@ function buildTextWindowRows(text: string, expanded: boolean, innerWidth: number
 const jsonTreeCache = new Map<string, string[]>();
 const JSON_TREE_CACHE_MAX = 16;
 
-// The text window clips to the frame's inner width, so unlike the tree its
-// rows are width-bound and the key says so.
-const textWindowCache = new Map<string, string[]>();
-const TEXT_WINDOW_CACHE_MAX = 8;
 
-/** Drop the oldest entry so a resize, which re-renders every visible block at
- * once, does not throw away the whole cache. */
+/** Drop the oldest entry rather than the whole map, so the documents still on
+ * screen survive a miss by one. */
 function evictOldest(cache: Map<string, string[]>, max: number): void {
   if (cache.size < max) return;
   const oldest = cache.keys().next().value;
@@ -2569,6 +2586,9 @@ function toolIsRendererless(component: FramedToolComponent): boolean {
   return component.getCallRenderer() === undefined && component.getResultRenderer() === undefined;
 }
 
+/** However much of a self-declared label a header will carry. */
+const TOOL_LABEL_MAX_LENGTH = 200;
+
 /** The name a block wears. A tool that draws nothing itself gets the label it
  * declared, verbatim — its own words beat a title derived from an identifier,
  * which for a bridged `mcp__opensearch__opensearch_indices_query` reads
@@ -2580,7 +2600,12 @@ function toolHeaderTitle(component: FramedToolComponent): string {
   if (override !== undefined) return override;
   const label = component.toolDefinition?.label;
   if (typeof label === "string" && label.trim().length > 0 && toolIsRendererless(component)) {
-    return sanitizeStatusText(label);
+    // A label is foreign text like any other: a bridged tool's comes from
+    // whatever a remote server answered `tools/list` with, and pi validates
+    // none of it. Strip whole escape sequences, spell out the control bytes
+    // that survive them, and bound the length before it reaches a bar that
+    // measures what it is given.
+    return sanitizeStatusText(escapeControlChars(stripAnsi(label))).slice(0, TOOL_LABEL_MAX_LENGTH);
   }
   return toolTitle(component.toolName);
 }
@@ -2607,11 +2632,17 @@ function renderDefaultToolBody(component: FramedToolComponent, width: number): r
   // serves both states here — a deliberate simplification.
   const lead = argsRow ? [argsRow] : [];
 
-  const text = component.isPartial ? undefined : toolResultText(component.result)?.trim();
-  if (!text) return argsRow ? lead : undefined;
+  const text = component.isPartial ? undefined : toolResultText(component.result)?.trimEnd();
+  if (!text) {
+    // omp names the silence rather than drawing an empty block — but not when
+    // images are the result, where there is nothing silent about it.
+    const settledEmpty = !component.isPartial && component.result !== undefined && component.imageComponents.length === 0;
+    if (settledEmpty) return [...lead, dimRow("(no output)")];
+    return argsRow ? lead : undefined;
+  }
 
   const expanded = component.expanded;
-  if (text.startsWith("{") || text.startsWith("[")) {
+  if (JSON_DOCUMENT_LEAD.test(text)) {
     // The cached rows embed preset glyphs, so the preset is part of the key;
     // a hit also skips re-parsing the (possibly large) result on every repaint.
     const key = `${glyphPreset} ${expanded ? 1 : 0} ${text}`;
@@ -2633,14 +2664,9 @@ function renderDefaultToolBody(component: FramedToolComponent, width: number): r
     }
   }
 
-  const textKey = `${expanded ? 1 : 0} ${innerWidth} ${text}`;
-  let textRows = textWindowCache.get(textKey);
-  if (textRows === undefined) {
-    textRows = buildTextWindowRows(text, expanded, innerWidth);
-    evictOldest(textWindowCache, TEXT_WINDOW_CACHE_MAX);
-    textWindowCache.set(textKey, textRows);
-  }
-  return [...lead, ...textRows];
+  // Uncached: the window itself is a slice of a few lines, and the sanitize
+  // that feeds it already dominates the call whether or not this is memoized.
+  return [...lead, ...buildTextWindowRows(text, expanded, innerWidth)];
 }
 
 /** Structural view of the patched component (the compiled class fields are public). */
@@ -2871,7 +2897,8 @@ function patchToolCallFraming(): void {
         // repeating it as the first row of the body. Hoist pi's leading call row
         // when there is one, but only if real content is left behind: an empty
         // frame is worse than a repeated target.
-        const { title, target } = splitToolCallRow(rawCall[first], this.toolName);
+        const { target } = splitToolCallRow(rawCall[first], this.toolName);
+        const title = toolHeaderTitle(this);
         let bodyStart = first;
         let framedHeader = header;
         // A renderer-less tool's body is rebuilt as omp's document view, args
@@ -2924,7 +2951,7 @@ function patchToolCallFraming(): void {
           }
         }
       } else {
-        lines.push(renderToolOneLine(rawCall[first], this.toolName));
+        lines.push(renderToolOneLine(rawCall[first], this));
         const preview = renderResultPreview(profile, this, width);
         if (preview) lines.push(...preview);
       }
@@ -3127,7 +3154,6 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     resultPreviewCache.clear();
     outputTailCache.clear();
     jsonTreeCache.clear();
-    textWindowCache.clear();
   });
 }
 
