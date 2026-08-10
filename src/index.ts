@@ -2290,13 +2290,16 @@ function clipPlain(text: string, maxWidth: number): string {
   if (visibleWidth(text) <= maxWidth) return text;
   let out = "";
   let used = 0;
+  // Per code point, so a ZWJ emoji cluster can split and under-fill where omp
+  // keeps it whole — never overflowing, which is the side that matters. The
+  // trailing strip keeps a severed joiner from fusing with the ellipsis.
   for (const char of text) {
     const charWidth = visibleWidth(char);
     if (used + charWidth > maxWidth - 1) break;
     out += char;
     used += charWidth;
   }
-  return `${out}…`;
+  return `${out.replace(/[\u200d\ufe0f]+$/, "")}…`;
 }
 
 /** omp's `formatScalar`: one JSON value, inline. */
@@ -2329,7 +2332,7 @@ function formatArgsInline(args: ToolArgs, maxWidth: number): string {
     }
     const pieceBudget = Math.min(cap, maxWidth - current - tailReserve);
     const valueMaxLen = Math.max(1, pieceBudget - visibleWidth(key) - 3);
-    const piece = `${key}=${formatJsonScalar(args[key], valueMaxLen)}`;
+    const piece = `${escapeControlChars(key)}=${formatJsonScalar(args[key], valueMaxLen)}`;
     const pieceWidth = visibleWidth(piece);
     if (pieceWidth > pieceBudget) return `${result}${sep}${clipPlain(piece, cap)}`;
     result += sep + piece;
@@ -2382,7 +2385,9 @@ function renderJsonTreeLines(
     ancestors.push(!isLast);
     try {
       if (val === null || val === undefined || typeof val !== "object") {
-        const label = muted(key ?? "value");
+        // Keys are attacker-controlled text too — a CR or ESC smuggled into a
+        // key name must render as its escape, exactly like one in a value.
+        const label = muted(escapeControlChars(key ?? "value"));
         if (typeof val === "string" && val.includes("\n")) {
           const strLines = val.split("\n");
           const maxStrLines = Math.min(strLines.length, Math.max(1, maxLines - lines.length - 1));
@@ -2409,7 +2414,7 @@ function renderJsonTreeLines(
         return;
       }
       if (Array.isArray(val)) {
-        pushLine(`${prefix}${muted(icons.array)} ${muted(key ?? "array")}`);
+        pushLine(`${prefix}${muted(icons.array)} ${muted(escapeControlChars(key ?? "array"))}`);
         if (val.length === 0) {
           pushLine(`${treePrefix(ancestors)}${dim(TREE_LAST)} ${dim("[]")}`);
           return;
@@ -2428,7 +2433,7 @@ function renderJsonTreeLines(
         return;
       }
       const record = val as Record<string, unknown>;
-      pushLine(`${prefix}${muted(icons.object)} ${muted(key ?? "object")}`);
+      pushLine(`${prefix}${muted(icons.object)} ${muted(escapeControlChars(key ?? "object"))}`);
       if (depth >= maxDepth) {
         pushLine(`${treePrefix(ancestors)}${dim(TREE_LAST)} ${dim("…")}`);
         return;
@@ -2523,7 +2528,7 @@ function renderJsonToolBody(component: FramedToolComponent, width: number): read
   if (!toolIsRendererless(component) || component.result?.isError) return undefined;
 
   const args = asToolArgs(component.args);
-  // omp leads this row with one alignment space (`mcp/render.ts`).
+  // omp leads this row with one alignment space (`default-renderer.ts`).
   const argsRow =
     Object.keys(args).length > 0
       ? dimRow(` ${TREE_LAST} ${formatArgsInline(args, Math.max(20, width - 4 - visibleWidth(TREE_LAST) - 2))}`)
@@ -2542,8 +2547,9 @@ function renderJsonToolBody(component: FramedToolComponent, width: number): read
   if (treeRows === undefined) {
     treeRows = buildJsonTreeRows(text, expanded);
     if (jsonTreeCache.size >= JSON_TREE_CACHE_MAX) {
-      // Oldest-out, not clear-all: a resize re-renders every visible block at
-      // once, and wholesale clearing would re-parse each of them.
+      // Oldest-out keeps the resident set warm; a cyclic sweep over more
+      // documents than the cache holds still misses throughout, like any
+      // FIFO — the frame memo above is what shields steady state.
       const oldest = jsonTreeCache.keys().next().value;
       if (oldest !== undefined) jsonTreeCache.delete(oldest);
     }
@@ -2772,7 +2778,13 @@ function patchToolCallFraming(): void {
       // is one of its one-line tools. Requiring that single row is what keeps this
       // safe for the rest: a `grep` with matches still gets its frame, so no output
       // can be hidden. Failures stay framed too, so the error text has a home.
+      //
+      // A renderer-less tool with a document body earns its frame even when pi
+      // drew a single row: its pending fallback is one bare name row, and the
+      // one-line bullet would hide the args line omp's call view shows.
+      const jsonBody = renderJsonToolBody(this, width);
       framed =
+        jsonBody !== undefined ||
         last - first !== 1 ||
         glyphs().tool[this.toolName] !== undefined ||
         this.result?.isError === true ||
@@ -2789,7 +2801,6 @@ function patchToolCallFraming(): void {
         // A renderer-less tool's body is rebuilt as omp's document view, args
         // included — hoisting pi's call row would put the raw args JSON in the
         // header the rebuild just cleaned up.
-        const jsonBody = renderJsonToolBody(this, width);
         if (target && !jsonBody) {
           let rest = first + 1;
           while (rest < last && isBlankRenderedLine(rawCall[rest])) rest++;
