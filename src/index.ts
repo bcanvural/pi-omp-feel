@@ -166,6 +166,9 @@ interface GlyphSet {
    * one transcript. */
   tool: Record<string, string>;
   status: { pending: string; running: string; error: string; bullet: string };
+  /** omp `icon.folder`/`icon.package`/`icon.file` — the node markers of its
+   * JSON document tree (objects, arrays, scalars). */
+  node: { object: string; array: string; scalar: string };
   thinking: Record<string, string>;
 }
 
@@ -175,6 +178,7 @@ const GLYPH_PRESETS: Record<GlyphPreset, GlyphSet> = {
     // The bullet is a filled circle in the nerd preset, not the typographic
     // one \u2014 captured from omp's own `\u25cf Read` rows.
     status: { pending: "\uf254", running: "\uf110", error: "\uf00d", bullet: "\uf111" },
+    node: { object: "\uf115", array: "\uf487", scalar: "\uf15b" },
     thinking: {
       minimal: "\u{f0a9e} min",
       low: "\u{f0a9f} low",
@@ -187,6 +191,7 @@ const GLYPH_PRESETS: Record<GlyphPreset, GlyphSet> = {
   unicode: {
     tool: { bash: "\u276f", write: "\u270e", edit: "\u270e", ssh: "\u21c4", mcp: "\u{1f50c}", write_stdin: "\u21c4" },
     status: { pending: "\u23f3", running: "\u27f3", error: "\u2718", bullet: "\u2022" },
+    node: { object: "\u{1f4c1}", array: "\u{1f4e6}", scalar: "\u{1f4c4}" },
     thinking: {
       minimal: "\u25cb min",
       low: "\u25d4 low",
@@ -2235,6 +2240,255 @@ function renderResultPreview(
   return rows;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// JSON document trees (omp's default-renderer view)
+//
+// A tool that ships no renderer gets a structured default in omp: its args as
+// a dim inline preview under the title, and a result that parses as JSON as a
+// guide-line document tree — muted keys, dim values, node icons, windowed by
+// state (omp `tools/json-tree.ts`, `tools/default-renderer.ts`,
+// `mcp/render.ts`). pi's fallback for the same class is the tool name over
+// pretty-printed JSON. MCP tools are the population this matters for, but the
+// gate is the renderer's absence, never a name.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const JSON_TREE_MAX_DEPTH_COLLAPSED = 2;
+const JSON_TREE_MAX_DEPTH_EXPANDED = 6;
+const JSON_TREE_MAX_LINES_COLLAPSED = 6;
+const JSON_TREE_MAX_LINES_EXPANDED = 200;
+const JSON_TREE_SCALAR_LEN_COLLAPSED = 60;
+const JSON_TREE_SCALAR_LEN_EXPANDED = 2000;
+
+// omp's `tree.*` symbols, identical in its nerd and unicode presets.
+const TREE_BRANCH = "├─";
+const TREE_LAST = "└─";
+const TREE_VERTICAL = "│";
+
+/** omp's `formatScalar`: one JSON value, inline. */
+function formatJsonScalar(value: unknown, maxLen: number): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "boolean" || typeof value === "number") return String(value);
+  if (typeof value === "string") {
+    const escaped = value.replace(/\n/g, "\\n").replace(/\t/g, "\\t");
+    return `"${truncateToWidth(escaped, maxLen)}"`;
+  }
+  if (Array.isArray(value)) return `[${value.length} items]`;
+  if (typeof value === "object") return `{${Object.keys(value).length} keys}`;
+  return String(value);
+}
+
+/** omp's `formatArgsInline`: `key=value, key2=…` within a width budget, each
+ * pending key reserving a minimal footprint so one long value cannot starve
+ * the keys behind it. */
+function formatArgsInline(args: ToolArgs, maxWidth: number): string {
+  const keys = Object.keys(args);
+  let result = "";
+  let width = 0;
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const sep = width > 0 ? ", " : "";
+    const current = width + visibleWidth(sep);
+    const cap = maxWidth - current - 1;
+    if (cap <= 0) return `${result}…`;
+    let tailReserve = 0;
+    for (let j = i + 1; j < keys.length; j++) {
+      tailReserve += 2 + visibleWidth(keys[j]) + 1 + 4;
+    }
+    const pieceBudget = Math.min(cap, maxWidth - current - tailReserve);
+    const valueMaxLen = Math.max(1, pieceBudget - visibleWidth(key) - 3);
+    const piece = `${key}=${formatJsonScalar(args[key], valueMaxLen)}`;
+    const pieceWidth = visibleWidth(piece);
+    if (pieceWidth > pieceBudget) return `${result}${sep}${truncateToWidth(piece, cap)}`;
+    result += sep + piece;
+    width = current + pieceWidth;
+  }
+  return result;
+}
+
+/** omp's `renderJsonTreeLines`: a JSON value as guide-line tree rows — muted
+ * keys, dim values and connectors, node icons per type, depth- and line-capped.
+ * Ported quirks kept: every root key of an object draws with the `└─`
+ * connector, and multiline strings render their first lines indented under
+ * the key with the closing quote on the last shown line. */
+function renderJsonTreeLines(
+  value: unknown,
+  maxDepth: number,
+  maxLines: number,
+  maxScalarLen: number,
+): { lines: string[]; truncated: boolean } {
+  const lines: string[] = [];
+  let truncated = false;
+  const muted = (text: string): string => `${fgAnsi(HEX.overlay1)}${text}${FG_RESET}`;
+  const dim = (text: string): string => `${fgAnsi(HEX_TOOL.dim)}${text}${FG_RESET}`;
+  const icons = glyphs().node;
+
+  const pushLine = (line: string): boolean => {
+    if (lines.length >= maxLines) {
+      truncated = true;
+      return false;
+    }
+    lines.push(line);
+    return true;
+  };
+
+  const treePrefix = (ancestors: readonly boolean[]): string =>
+    ancestors.map(hasNext => (hasNext ? `${TREE_VERTICAL}  ` : "   ")).join("");
+
+  const renderNode = (
+    val: unknown,
+    key: string | undefined,
+    ancestors: boolean[],
+    isLast: boolean,
+    depth: number,
+  ): void => {
+    if (lines.length >= maxLines) {
+      truncated = true;
+      return;
+    }
+    const prefix = `${treePrefix(ancestors)}${dim(isLast ? TREE_LAST : TREE_BRANCH)} `;
+    ancestors.push(!isLast);
+    try {
+      if (val === null || val === undefined || typeof val !== "object") {
+        const label = muted(key ?? "value");
+        if (typeof val === "string" && val.includes("\n")) {
+          const strLines = val.split("\n");
+          const maxStrLines = Math.min(strLines.length, Math.max(1, maxLines - lines.length - 1));
+          const continuePrefix = treePrefix(ancestors);
+          pushLine(`${prefix}${muted(icons.scalar)} ${label}: ${dim(`"${truncateToWidth(strLines[0], maxScalarLen)}`)}`);
+          for (let i = 1; i < maxStrLines; i++) {
+            if (lines.length >= maxLines) {
+              truncated = true;
+              break;
+            }
+            pushLine(`${continuePrefix}   ${dim(` ${truncateToWidth(strLines[i], maxScalarLen)}`)}`);
+          }
+          if (strLines.length > maxStrLines) {
+            truncated = true;
+            pushLine(`${continuePrefix}   ${dim(` …(${strLines.length - maxStrLines} more lines)"`)}`);
+          } else if (lines.length > 0) {
+            lines[lines.length - 1] += dim('"');
+          }
+          return;
+        }
+        pushLine(`${prefix}${muted(icons.scalar)} ${label}: ${dim(formatJsonScalar(val, maxScalarLen))}`);
+        return;
+      }
+      if (Array.isArray(val)) {
+        pushLine(`${prefix}${muted(icons.array)} ${muted(key ?? "array")}`);
+        if (val.length === 0) {
+          pushLine(`${treePrefix(ancestors)}${dim(TREE_LAST)} ${dim("[]")}`);
+          return;
+        }
+        if (depth >= maxDepth) {
+          pushLine(`${treePrefix(ancestors)}${dim(TREE_LAST)} ${dim("…")}`);
+          return;
+        }
+        for (let i = 0; i < val.length; i++) {
+          renderNode(val[i], `[${i}]`, ancestors, i === val.length - 1, depth + 1);
+          if (lines.length >= maxLines) {
+            truncated = true;
+            return;
+          }
+        }
+        return;
+      }
+      const record = val as Record<string, unknown>;
+      pushLine(`${prefix}${muted(icons.object)} ${muted(key ?? "object")}`);
+      if (depth >= maxDepth) {
+        pushLine(`${treePrefix(ancestors)}${dim(TREE_LAST)} ${dim("…")}`);
+        return;
+      }
+      const childKeys = Object.keys(record);
+      if (childKeys.length === 0) {
+        pushLine(`${treePrefix(ancestors)}${dim(TREE_LAST)} ${dim("{}")}`);
+        return;
+      }
+      for (let i = 0; i < childKeys.length; i++) {
+        renderNode(record[childKeys[i]], childKeys[i], ancestors, i === childKeys.length - 1, depth + 1);
+        if (lines.length >= maxLines) {
+          truncated = true;
+          return;
+        }
+      }
+    } finally {
+      ancestors.pop();
+    }
+  };
+
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      renderNode((value as Record<string, unknown>)[key], key, [], true, 1);
+      if (lines.length >= maxLines) {
+        truncated = true;
+        break;
+      }
+    }
+  } else if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      renderNode(value[i], `[${i}]`, [], i === value.length - 1, 1);
+      if (lines.length >= maxLines) {
+        truncated = true;
+        break;
+      }
+    }
+  } else {
+    renderNode(value, undefined, [], true, 0);
+  }
+  return { lines, truncated };
+}
+
+// Tree rows depend only on the parsed text and the window, so the cache skips
+// the parse + walk on every repaint of a settled block.
+const jsonTreeCache = new Map<string, string[]>();
+const JSON_TREE_CACHE_MAX = 16;
+
+/** The omp default-renderer body for a tool without renderers: a dim inline
+ * args row, then the JSON result as a document tree with omp's state windows.
+ * Pending calls get the args row alone — omp's call view — instead of pi's
+ * pretty-printed args block. Anything else (errors, non-JSON results, tools
+ * with renderers) returns nothing and keeps pi's rows. */
+function renderJsonToolBody(component: FramedToolComponent, width: number): readonly string[] | undefined {
+  if (component.hasRendererDefinition() || component.result?.isError) return undefined;
+
+  const args = asToolArgs(component.args);
+  const argsRow =
+    Object.keys(args).length > 0
+      ? dimRow(`${TREE_LAST} ${formatArgsInline(args, Math.max(20, width - 4 - visibleWidth(TREE_LAST) - 1))}`)
+      : undefined;
+
+  if (component.isPartial) return argsRow ? [argsRow] : undefined;
+
+  const text = toolResultText(component.result)?.trim();
+  if (!text || !(text.startsWith("{") || text.startsWith("["))) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+
+  const expanded = component.expanded;
+  const key = `${expanded ? 1 : 0} ${text}`;
+  let treeRows = jsonTreeCache.get(key);
+  if (treeRows === undefined) {
+    if (jsonTreeCache.size >= JSON_TREE_CACHE_MAX) jsonTreeCache.clear();
+    const tree = renderJsonTreeLines(
+      parsed,
+      expanded ? JSON_TREE_MAX_DEPTH_EXPANDED : JSON_TREE_MAX_DEPTH_COLLAPSED,
+      expanded ? JSON_TREE_MAX_LINES_EXPANDED : JSON_TREE_MAX_LINES_COLLAPSED,
+      expanded ? JSON_TREE_SCALAR_LEN_EXPANDED : JSON_TREE_SCALAR_LEN_COLLAPSED,
+    );
+    treeRows = tree.lines;
+    // omp closes a collapsed tree with the expand hint and an expanded,
+    // still-deeper one with a dim ellipsis.
+    if (!expanded) treeRows.push(dimRow(EXPAND_HINT));
+    else if (tree.truncated) treeRows.push(dimRow("…"));
+    jsonTreeCache.set(key, treeRows);
+  }
+  return argsRow ? [argsRow, ...treeRows] : treeRows;
+}
+
 /** Structural view of the patched component (the compiled class fields are public). */
 interface FramedToolComponent {
   render: (width: number) => string[];
@@ -2455,7 +2709,11 @@ function patchToolCallFraming(): void {
         const { title, target } = splitToolCallRow(rawCall[first], this.toolName);
         let bodyStart = first;
         let framedHeader = header;
-        if (target) {
+        // A renderer-less tool's body is rebuilt as omp's document view, args
+        // included — hoisting pi's call row would put the raw args JSON in the
+        // header the rebuild just cleaned up.
+        const jsonBody = renderJsonToolBody(this, width);
+        if (target && !jsonBody) {
           let rest = first + 1;
           while (rest < last && isBlankRenderedLine(rawCall[rest])) rest++;
           if (rest < last) {
@@ -2489,6 +2747,7 @@ function patchToolCallFraming(): void {
         // must not push that text behind the marker, so failure renders uncapped.
         const diffUncapped = this.expanded || this.result?.isError === true;
         const treatedBody =
+          jsonBody ??
           (bodyStart !== first ? renderContentBody(profile, this, width) : undefined) ??
           (bodyLooksLikeDiff(body())
             ? renderDiffBody(body(), diffUncapped, this.isPartial, profileLanguage(profile, this.args))
@@ -2703,6 +2962,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     contentPreviewCache.clear();
     resultPreviewCache.clear();
     outputTailCache.clear();
+    jsonTreeCache.clear();
   });
 }
 
