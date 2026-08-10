@@ -2438,10 +2438,35 @@ function renderJsonTreeLines(
   return { lines, truncated };
 }
 
-// Tree rows depend only on the parsed text and the window, so the cache skips
-// the parse + walk on every repaint of a settled block.
+// Tree rows depend only on the parsed text, the window, and the glyph preset
+// (node icons are baked into the rows), so the cache skips the parse + walk
+// on every repaint of a settled block.
 const jsonTreeCache = new Map<string, string[]>();
 const JSON_TREE_CACHE_MAX = 16;
+
+/** Parse and walk one result text into finished tree rows; empty when the
+ * text is not a renderable document. */
+function buildJsonTreeRows(text: string, expanded: boolean): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const tree = renderJsonTreeLines(
+    parsed,
+    expanded ? JSON_TREE_MAX_DEPTH_EXPANDED : JSON_TREE_MAX_DEPTH_COLLAPSED,
+    expanded ? JSON_TREE_MAX_LINES_EXPANDED : JSON_TREE_MAX_LINES_COLLAPSED,
+    expanded ? JSON_TREE_SCALAR_LEN_EXPANDED : JSON_TREE_SCALAR_LEN_COLLAPSED,
+  );
+  if (tree.lines.length === 0) return [];
+  const rows = tree.lines;
+  // omp closes a collapsed tree with the expand hint and an expanded,
+  // still-deeper one with a dim ellipsis.
+  if (!expanded) rows.push(dimRow(EXPAND_HINT));
+  else if (tree.truncated) rows.push(dimRow("…"));
+  return rows;
+}
 
 /** The omp default-renderer body for a tool without renderers: a dim inline
  * args row, then the JSON result as a document tree with omp's state windows.
@@ -2461,31 +2486,25 @@ function renderJsonToolBody(component: FramedToolComponent, width: number): read
 
   const text = toolResultText(component.result)?.trim();
   if (!text || !(text.startsWith("{") || text.startsWith("["))) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return undefined;
-  }
 
+  // The cached rows embed preset glyphs, so the preset is part of the key;
+  // a hit also skips re-parsing the (possibly large) result on every repaint.
   const expanded = component.expanded;
-  const key = `${expanded ? 1 : 0} ${text}`;
+  const key = `${glyphPreset} ${expanded ? 1 : 0} ${text}`;
   let treeRows = jsonTreeCache.get(key);
   if (treeRows === undefined) {
+    treeRows = buildJsonTreeRows(text, expanded);
     if (jsonTreeCache.size >= JSON_TREE_CACHE_MAX) jsonTreeCache.clear();
-    const tree = renderJsonTreeLines(
-      parsed,
-      expanded ? JSON_TREE_MAX_DEPTH_EXPANDED : JSON_TREE_MAX_DEPTH_COLLAPSED,
-      expanded ? JSON_TREE_MAX_LINES_EXPANDED : JSON_TREE_MAX_LINES_COLLAPSED,
-      expanded ? JSON_TREE_SCALAR_LEN_EXPANDED : JSON_TREE_SCALAR_LEN_COLLAPSED,
-    );
-    treeRows = tree.lines;
-    // omp closes a collapsed tree with the expand hint and an expanded,
-    // still-deeper one with a dim ellipsis.
-    if (!expanded) treeRows.push(dimRow(EXPAND_HINT));
-    else if (tree.truncated) treeRows.push(dimRow("…"));
     jsonTreeCache.set(key, treeRows);
   }
+  // The empty entry is the cached "not a tree" verdict: unparseable text
+  // (JSON cut by truncation) or an empty document (`{}`, `[]`), where omp
+  // falls back to raw text rather than framing a lone expand hint. Cached so
+  // a large unparseable result is not re-parsed on every repaint.
+  if (treeRows.length === 0) return undefined;
+  // omp's result view shows args only when expanded (as a labeled tree); the
+  // inline row is kept in both states here — the call context reads better
+  // beside the tree than above a re-collapsed block, a deliberate deviation.
   return argsRow ? [argsRow, ...treeRows] : treeRows;
 }
 
