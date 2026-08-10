@@ -1467,6 +1467,7 @@ function renderCommandLines(
   rawLines: readonly string[],
   profile: ToolProfile | undefined,
   args: unknown,
+  expanded: boolean,
 ): readonly string[] {
   const toolArgs = asToolArgs(args);
   const command = profile?.command?.(toolArgs)?.replace(/\t/g, "   ") ?? "";
@@ -1483,7 +1484,14 @@ function renderCommandLines(
   if (detail.length > 0) {
     lines[lines.length - 1] += `${fgAnsi(HEX.overlay0)} (${detail.join(" · ")})${FG_RESET}`;
   }
-  return lines;
+
+  // omp caps a collapsed command to a viewport-sized tail (`capPreviewLines`),
+  // trading the marker row for one visible line — the `$` prefix scrolls away
+  // with the head there too. A heredoc no longer swallows the whole screen.
+  const max = previewWindowRows();
+  if (expanded || lines.length <= max) return lines;
+  const visible = lines.slice(lines.length - (max - 1));
+  return [earlierLinesMarker(lines.length - visible.length), ...visible];
 }
 
 /** Strip each row once. Profiles walk the rows more than once, and stripping is
@@ -1799,7 +1807,7 @@ function patchToolCallFraming(): void {
       // result exists. Render pi's call/result components independently to
       // remove the Box's vertical padding and preserve that structure. A tool
       // that leads with something other than a command keeps its header.
-      const callLines = renderCommandLines(rawCall, profile, this.args);
+      const callLines = renderCommandLines(rawCall, profile, this.args, this.expanded);
       const resultLines = profile?.wall
         ? profile.wall(stripRows(rawResult), asToolArgs(this.args))
         : rawResult;
