@@ -2388,6 +2388,15 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   patchToolCallFraming();
   loadGlyphPreset();
 
+  // pi-runbg windows its own collapsed output and documents
+  // PI_RUNBG_PREVIEW_LINES as the way to deepen it. Seed omp's depth when the
+  // operator has not chosen one, so exec_command blocks match the ten-line
+  // tail bash gets here without anyone exporting anything. runbg reads the
+  // variable lazily at render time, so extension load order does not matter;
+  // a value set in the shell always wins, and without runbg installed the
+  // variable is simply never read.
+  process.env.PI_RUNBG_PREVIEW_LINES ??= String(OUTPUT_TAIL_LINES);
+
   pi.registerFlag(GLYPH_FLAG, {
     type: "string",
     description: `Glyph preset for omp styling: ${GLYPH_PRESET_NAMES.join(" or ")}`,
