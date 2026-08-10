@@ -1436,17 +1436,16 @@ function profileLanguage(profile: ToolProfile | undefined, args: unknown): strin
   return path ? getLanguageFromPath(path) : undefined;
 }
 
-/** Split pi's `<tool> <target>` call row into its two halves, so both the
- * one-line rows and the framed headers can name what the tool acted on without
- * per-tool knowledge of where the target lives in `args`. Returns no target
- * unless the row really does lead with this tool's name. */
-function splitToolCallRow(contentLine: string, toolName: string): { title: string; target: string } {
+/** What pi's `<tool> <target>` call row says the tool acted on, so both the
+ * one-line rows and the framed headers can name it without per-tool knowledge
+ * of where the target lives in `args`. Empty unless the row really does lead
+ * with this tool's name. */
+function toolCallRowTarget(contentLine: string, toolName: string): string {
   const plain = sanitizeStatusText(stripAnsi(contentLine));
   const split = plain.indexOf(" ");
   const label = split === -1 ? plain : plain.slice(0, split);
-  const title = toolTitle(toolName);
-  if (label.toLowerCase() !== toolName.toLowerCase()) return { title, target: "" };
-  return { title, target: split === -1 ? "" : plain.slice(split + 1) };
+  if (label.toLowerCase() !== toolName.toLowerCase()) return "";
+  return split === -1 ? "" : plain.slice(split + 1);
 }
 
 /** omp renders tools it gives no identity glyph to — `read` and friends — as a
@@ -1454,7 +1453,7 @@ function splitToolCallRow(contentLine: string, toolName: string): { title: strin
  * then the target in `accent`. Neither of omp's glyph presets defines a
  * `tool.read`/`tool.grep`/`tool.ls` entry, which is how it marks them out. */
 function renderToolOneLine(contentLine: string, component: FramedToolComponent): string {
-  const { target } = splitToolCallRow(contentLine, component.toolName);
+  const target = toolCallRowTarget(contentLine, component.toolName);
   // Same name the frame would use: a tool that draws one row while pending
   // and a block once it settles must not appear to be two different tools.
   const title = toolHeaderTitle(component);
@@ -2498,7 +2497,57 @@ const TRAILING_NOTICE_LINE = /^\[.*\]$/;
 const JSON_DOCUMENT_LEAD = /^\s*[{[]/;
 
 /** Rows that notice may occupy, however long it is. */
-const NOTICE_MAX_ROWS = 3;
+const NOTICE_MAX_ROWS = 4;
+
+/** Clip from the middle, keeping both ends. A truncation notice earns this
+ * over `clipPlain`: what it exists to carry — the path to the rest of the
+ * output — sits at its end, so trimming the tail throws away the point of
+ * keeping the line at all. */
+function clipMiddle(text: string, maxWidth: number): string {
+  if (visibleWidth(text) <= maxWidth) return text;
+  if (maxWidth <= 1) return "…";
+  const chars = [...text];
+  const budget = maxWidth - 1;
+  const headBudget = Math.ceil(budget / 2);
+  let head = "";
+  let headWidth = 0;
+  for (const char of chars) {
+    const charWidth = visibleWidth(char);
+    if (headWidth + charWidth > headBudget) break;
+    head += char;
+    headWidth += charWidth;
+  }
+  let tail = "";
+  let tailWidth = 0;
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const charWidth = visibleWidth(chars[i]);
+    if (tailWidth + charWidth > budget - headWidth) break;
+    tail = chars[i] + tail;
+    tailWidth += charWidth;
+  }
+  return `${head}…${tail}`;
+}
+
+/** Wrap by cells rather than by words. A notice is one long machine string —
+ * a path, a byte count — and prose wrapping strands its short tokens on rows
+ * of their own, which is how a bounded row count silently loses the tail. */
+function hardWrap(text: string, width: number): string[] {
+  const rows: string[] = [];
+  let row = "";
+  let used = 0;
+  for (const char of text) {
+    const charWidth = visibleWidth(char);
+    if (used + charWidth > width && row !== "") {
+      rows.push(row);
+      row = "";
+      used = 0;
+    }
+    row += char;
+    used += charWidth;
+  }
+  if (row !== "") rows.push(row);
+  return rows;
+}
 
 /** omp's raw-output window. Lines are clipped rather than wrapped, as omp
  * clips them, so the count in the marker is the count of real lines. */
@@ -2512,7 +2561,14 @@ function buildTextWindowRows(text: string, expanded: boolean, innerWidth: number
   // not swallow. The blank line it was appended after leaves with it, or the
   // marker would count an empty line as output held back.
   let notice: string | undefined;
-  if (end > 1 && TRAILING_NOTICE_LINE.test(lines[end - 1])) {
+  let hasBodyBefore = false;
+  for (let i = 0; i < end - 1; i++) {
+    if (lines[i].trim() !== "") {
+      hasBodyBefore = true;
+      break;
+    }
+  }
+  if (hasBodyBefore && TRAILING_NOTICE_LINE.test(lines[end - 1])) {
     notice = lines[end - 1];
     end--;
     while (end > 0 && lines[end - 1].trim() === "") end--;
@@ -2530,9 +2586,13 @@ function buildTextWindowRows(text: string, expanded: boolean, innerWidth: number
     // path. Bounded all the same — a notice is only ever a notice by shape,
     // and a bracketed line of any size must not outgrow the window it sits
     // beneath.
-    const bounded = clipPlain(notice, innerWidth * NOTICE_MAX_ROWS);
-    const wrapped = new Text(`${fgAnsi(HEX.yellow)}${bounded}${FG_RESET}`, 0, 0).render(innerWidth);
-    rows.push(...wrapped.slice(0, NOTICE_MAX_ROWS));
+    // Budgeted a cell per row short of the width, so the bound survives even
+    // where every character is two cells wide, and elided in the middle so
+    // both the head and the path at the end come through.
+    const bounded = clipMiddle(notice, Math.max(1, innerWidth - 1) * NOTICE_MAX_ROWS);
+    for (const row of hardWrap(bounded, innerWidth)) {
+      rows.push(`${fgAnsi(HEX.yellow)}${row}${FG_RESET}`);
+    }
   }
   return rows;
 }
@@ -2605,7 +2665,8 @@ function toolHeaderTitle(component: FramedToolComponent): string {
     // none of it. Strip whole escape sequences, spell out the control bytes
     // that survive them, and bound the length before it reaches a bar that
     // measures what it is given.
-    return sanitizeStatusText(escapeControlChars(stripAnsi(label))).slice(0, TOOL_LABEL_MAX_LENGTH);
+    const flattened = sanitizeStatusText(escapeControlChars(stripAnsi(label)));
+    return [...flattened].slice(0, TOOL_LABEL_MAX_LENGTH).join("");
   }
   return toolTitle(component.toolName);
 }
@@ -2897,7 +2958,7 @@ function patchToolCallFraming(): void {
         // repeating it as the first row of the body. Hoist pi's leading call row
         // when there is one, but only if real content is left behind: an empty
         // frame is worse than a repeated target.
-        const { target } = splitToolCallRow(rawCall[first], this.toolName);
+        const target = toolCallRowTarget(rawCall[first], this.toolName);
         const title = toolHeaderTitle(this);
         let bodyStart = first;
         let framedHeader = header;
