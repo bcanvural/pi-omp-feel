@@ -1265,6 +1265,11 @@ interface ToolProfile {
   /** Where the file this tool touches lives in `args`, so rows showing that
    * file can be highlighted in its language the way omp does. */
   contentPath?(args: ToolArgs): string | undefined;
+  /** Where the content this tool writes lives in `args`. A tool that says so
+   * has its body rebuilt as omp's write preview — dim line-number gutter, a
+   * live tail while streaming, the first lines once settled — instead of
+   * keeping pi's head-10 window. */
+  content?(args: ToolArgs): string | undefined;
   /** Call-side detail for the dim `(a · b)` suffix that follows a command.
    * Built from `args` rather than parsed back out of the row being replaced, so
    * rewriting the row cannot silently drop something the tool wanted shown. */
@@ -1310,7 +1315,14 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
   // Keystrokes into a live session are not a command, so this one keeps a
   // header — but its output is still output, and belongs under a divider.
   ["write_stdin", { sections: true, wall: runbgWall }],
-  ["write", { summary: writeLineSummary, contentPath: pathFromArgs }],
+  [
+    "write",
+    {
+      summary: writeLineSummary,
+      contentPath: pathFromArgs,
+      content: args => (typeof args.content === "string" ? args.content : undefined),
+    },
+  ],
   ["edit", { frameSelfRendered: true, summary: editDiffSummary, contentPath: pathFromArgs }],
   // pi-ask. One question puts itself in the header via the usual target hoist;
   // several need saying, since only the first would otherwise be visible.
@@ -1840,6 +1852,75 @@ function renderDiffBody(
   return out;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Content previews (omp's write cell)
+//
+// omp previews written content behind a dim line-number gutter, tokenized in
+// the file's language, windowed by state: a live tail of the last 12 lines
+// while streaming, the first 6 once settled and collapsed, everything when
+// expanded (omp `write.ts` `formatStreamingContent`/`renderContentPreview`).
+// pi shows a frozen head of 10 with no gutter; a profile that names its
+// `content` gets the omp shape rebuilt from `args` instead.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CONTENT_STREAMING_TAIL_LINES = 12;
+const CONTENT_COLLAPSED_HEAD_LINES = 6;
+const CONTENT_GUTTER_MIN_WIDTH = 3;
+
+// Keys embed the whole content, so this stays small: entries are only hit
+// while their block is visible and mutating, and a session's writes would
+// otherwise pin every past file in memory.
+const contentPreviewCache = new Map<string, string[]>();
+const CONTENT_PREVIEW_CACHE_MAX = 16;
+
+/** Rebuild a content-bearing body in omp's write-cell shape. Only the visible
+ * slice is tokenized, exactly as omp does, so a long file costs its window,
+ * not its length. Returns nothing when the tool has no said content or failed
+ * — pi's own rows stay, and nothing can be hidden by mistake. */
+function renderContentBody(
+  profile: ToolProfile | undefined,
+  component: FramedToolComponent,
+  width: number,
+): readonly string[] | undefined {
+  const content = profile?.content?.(asToolArgs(component.args));
+  if (!content || component.result?.isError) return undefined;
+
+  const streaming = component.isPartial;
+  const expanded = component.expanded;
+  const lang = profileLanguage(profile, component.args);
+  const innerWidth = Math.max(1, width - 4);
+  const key = `${lang} ${innerWidth} ${(streaming ? 1 : 0) | (expanded ? 2 : 0)} ${content}`;
+  const cached = contentPreviewCache.get(key);
+  if (cached !== undefined) return cached;
+  if (contentPreviewCache.size >= CONTENT_PREVIEW_CACHE_MAX) contentPreviewCache.clear();
+
+  // No trailing-empty trim: omp renders the row a trailing newline creates,
+  // which is also what the `· 4 lines` badge counts.
+  const lines = content.replace(/\t/g, "   ").split("\n");
+  const totalLines = lines.length;
+  const start = streaming && !expanded ? Math.max(0, totalLines - CONTENT_STREAMING_TAIL_LINES) : 0;
+  const end = !streaming && !expanded ? Math.min(totalLines, CONTENT_COLLAPSED_HEAD_LINES) : totalLines;
+  const visible = lines.slice(start, end);
+
+  let highlighted = lang ? highlightCode(visible.join("\n"), lang) : visible;
+  if (highlighted.length !== visible.length) highlighted = visible;
+  const gutterWidth = Math.max(CONTENT_GUTTER_MIN_WIDTH, String(totalLines).length);
+  const gutted = highlighted.map(
+    (line, index) => `${fgAnsi(HEX_TOOL.dim)}${String(start + index + 1).padStart(gutterWidth)} ${FG_RESET}${line}`,
+  );
+
+  const rows: string[] = [];
+  if (start > 0) rows.push(dimRow(`… (${start} earlier line${start === 1 ? "" : "s"})`));
+  // Pre-wrapped at the frame's inner width because the frame renderer
+  // truncates; pi's own preview wraps, and content must not be lost to that.
+  rows.push(...new Text(gutted.join("\n"), 0, 0).render(innerWidth));
+  if (end < totalLines) rows.push(moreLinesMarker(totalLines - end));
+  if (streaming) rows.push(dimRow("… (streaming)"));
+
+  contentPreviewCache.set(key, rows);
+  return rows;
+}
+
 /** Structural view of the patched component (the compiled class fields are public). */
 interface FramedToolComponent {
   render: (width: number) => string[];
@@ -2078,16 +2159,21 @@ function patchToolCallFraming(): void {
         if (summary) framedHeader += ` ${summary}`;
 
         lines.push(buildFrameBar(width, "top", framedHeader, borderColor, barBg));
-        // A body carrying pi diff rows gets omp's row treatment. The badge
-        // above counts the untreated rows, so it always reports the full diff.
-        // Qualification needs one numbered change row, which file content shown
-        // by other tools can in principle contain — the cost there is a stray
-        // indent glyph, the same cheap-to-be-wrong trade the badge makes.
-        const diffBody = bodyLooksLikeDiff(body())
-          ? renderDiffBody(body(), this.expanded, this.isPartial, profileLanguage(profile, this.args))
-          : undefined;
-        if (diffBody) {
-          for (const row of diffBody) lines.push(frameBodyRow(row, width, borderColor, barBg));
+        // A profiled content body is rebuilt as omp's write cell — but only
+        // once the header hoist has claimed the call row, so the rebuild can
+        // never swallow it. A body carrying pi diff rows gets omp's row
+        // treatment instead. The badge above counts the untreated rows, so it
+        // always reports the full diff. Diff qualification needs one numbered
+        // change row, which file content shown by other tools can in principle
+        // contain — the cost there is a stray indent glyph, the same
+        // cheap-to-be-wrong trade the badge makes.
+        const treatedBody =
+          (bodyStart !== first ? renderContentBody(profile, this, width) : undefined) ??
+          (bodyLooksLikeDiff(body())
+            ? renderDiffBody(body(), this.expanded, this.isPartial, profileLanguage(profile, this.args))
+            : undefined);
+        if (treatedBody) {
+          for (const row of treatedBody) lines.push(frameBodyRow(row, width, borderColor, barBg));
         } else {
           for (let i = bodyStart; i < last; i++) {
             lines.push(frameBodyRow(rawCall[i], width, borderColor, barBg));
@@ -2291,6 +2377,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     cachedWorkingFrames = undefined;
     bashHighlightCache.clear();
     contextHighlightCache.clear();
+    contentPreviewCache.clear();
   });
 }
 
