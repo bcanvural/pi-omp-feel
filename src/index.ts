@@ -1280,8 +1280,12 @@ interface ToolProfile {
    * it. */
   command?(args: ToolArgs): string | undefined;
   /** Where the file this tool touches lives in `args`, so rows showing that
-   * file can be highlighted in its language the way omp does. */
+   * file can be highlighted in its language the way omp does, and so the
+   * header can name it even when pi wrapped its call row. */
   contentPath?(args: ToolArgs): string | undefined;
+  /** What pi writes after that path on the call row — a line range — kept
+   * beside the target when the header is rebuilt from `args`. */
+  targetSuffix?(args: ToolArgs): string | undefined;
   /** Where the content this tool writes lives in `args`. A tool that says so
    * has its body rebuilt as omp's write preview — dim line-number gutter, a
    * live tail while streaming, the first lines once settled — instead of
@@ -1359,6 +1363,14 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
     "read",
     {
       contentPath: pathFromArgs,
+      // pi's `formatReadLineRange`: `:12`, or `:12-40` when a limit is set.
+      targetSuffix: args => {
+        const offset = typeof args.offset === "number" && Number.isFinite(args.offset) ? Math.floor(args.offset) : undefined;
+        const limit = typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.floor(args.limit) : undefined;
+        if (offset === undefined && limit === undefined) return undefined;
+        const start = offset ?? 1;
+        return limit === undefined ? `:${start}` : `:${start}-${start + limit - 1}`;
+      },
       resultText: result => toolResultText(result)?.replace(READ_NOTICE_TAIL, ""),
       startLine: args => {
         const offset = args.offset;
@@ -1468,6 +1480,34 @@ function renderToolOneLine(target: string, title: string): string {
   return target ? `${head} ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}` : head;
 }
 
+/** Where the call line ends, read off the rows rather than guessed from a
+ * width. pi spells a call as `<tool> <shortened path>`, so the rows are
+ * consumed until exactly that much text has been seen — which ends the call
+ * on the row that completes the path, however the wrap fell. A run whose
+ * text is not that call (a renderer that puts content straight under it, an
+ * unrecognized shape) yields the single row pi's layout gave before wrapped
+ * calls were understood at all, leaving everything else in the body where it
+ * cannot be swallowed. Anything pi appends past the path — a line range, an
+ * expand hint — stays in the body on the rare row it spills onto. */
+function callRunEnd(
+  rows: readonly string[],
+  first: number,
+  runEnd: number,
+  toolName: string,
+  path: string | undefined,
+): number {
+  const single = Math.min(runEnd, first + 1);
+  if (path === undefined) return single;
+  const want = `${toolName}${shortenPath(path)}`.replace(/\s+/g, "");
+  let seen = "";
+  for (let i = first; i < runEnd; i++) {
+    seen += stripAnsi(rows[i]).replace(/\s+/g, "");
+    if (seen.length >= want.length) return seen.startsWith(want) ? i + 1 : single;
+    if (!want.startsWith(seen)) return single;
+  }
+  return runEnd;
+}
+
 /** A path the way omp shows one: relative to the directory the session is in,
  * or with the home prefix folded, rather than pi's absolute spelling. */
 function displayToolPath(path: string): string {
@@ -1552,6 +1592,14 @@ const SHELL_KEYWORDS = new Set([
 
 /** `|`, `||`, `&&`, `;`, `&`, and the redirection family. */
 const SHELL_OPERATOR_LEAD = /[|;&<>]/;
+/** Substitution and grouping brackets, which omp paints as punctuation and
+ * which start a fresh command word inside. */
+const SHELL_BRACKET = /[()]/;
+const SHELL_SPACE = /\s/;
+/** Anything that ends a word. */
+const SHELL_WORD_BREAK = /[\s|;&<>()'"]/;
+/** `NAME=value` — an assignment, not a command. */
+const SHELL_ASSIGNMENT = /^([A-Za-z_]\w*)=/;
 
 function highlightShellCommand(command: string): string {
   const fn = fgAnsi(HEX.blue);
@@ -1565,15 +1613,11 @@ function highlightShellCommand(command: string): string {
 
   let out = "";
   let index = 0;
-  // A command word is the first word of the line and of every segment an
-  // operator opens; the words after it are its arguments. omp paints both in
-  // the same colour, so the distinction only matters for keywords.
-  const isWord = (char: string): boolean => !/[\s|;&<>]/.test(char);
 
   while (index < command.length) {
     const char = command[index];
 
-    if (char === "\n" || /\s/.test(char)) {
+    if (SHELL_SPACE.test(char)) {
       out += char;
       index++;
       continue;
@@ -1619,6 +1663,14 @@ function highlightShellCommand(command: string): string {
       continue;
     }
 
+    if (SHELL_BRACKET.test(char)) {
+      let end = index;
+      while (end < command.length && SHELL_BRACKET.test(command[end])) end++;
+      out += paint(punct, command.slice(index, end));
+      index = end;
+      continue;
+    }
+
     if (SHELL_OPERATOR_LEAD.test(char)) {
       let end = index;
       while (end < command.length && SHELL_OPERATOR_LEAD.test(command[end])) end++;
@@ -1628,16 +1680,26 @@ function highlightShellCommand(command: string): string {
     }
 
     let end = index;
-    while (end < command.length && isWord(command[end]) && command[end] !== "'" && command[end] !== '"') end++;
+    while (end < command.length && !SHELL_WORD_BREAK.test(command[end])) end++;
     const word = command.slice(index, end);
     index = end;
 
-    if (SHELL_KEYWORDS.has(word)) {
+    const assignment = SHELL_ASSIGNMENT.exec(word);
+    if (assignment) {
+      // `NODE_ENV=production npm start` — the name is a variable, not a command.
+      out += paint(variable, assignment[1]) + paint(punct, "=") + paint(fn, word.slice(assignment[0].length));
+    } else if (SHELL_KEYWORDS.has(word)) {
       out += paint(keyword, word);
     } else if (word.startsWith("-")) {
-      // A flag reads as its dashes and its name, coloured apart.
+      // A flag reads as its dashes and its name, coloured apart; `--flag=value`
+      // keeps its value in the argument colour.
       const dashes = /^-+/.exec(word)?.[0] ?? "-";
-      out += paint(punct, dashes) + paint(variable, word.slice(dashes.length));
+      const rest = word.slice(dashes.length);
+      const eq = rest.indexOf("=");
+      out += paint(punct, dashes);
+      out += eq === -1
+        ? paint(variable, rest)
+        : paint(variable, rest.slice(0, eq)) + paint(punct, "=") + paint(fn, rest.slice(eq + 1));
     } else if (/^\d+$/.test(word)) {
       out += paint(number, word);
     } else if (word.startsWith("$")) {
@@ -1787,7 +1849,7 @@ function runbgWall(rows: readonly StrippedRow[], args: ToolArgs): readonly strin
 // Collapsed previews
 //
 // omp sizes its collapsed tool previews from the live viewport and closes them
-// with dim `… N … lines ⟨ctrl+o: Expand⟩` markers (`tools/render-utils.ts`:
+// with dim `… N … lines ⟨Ctrl+O: Expand⟩` markers (`tools/render-utils.ts`:
 // `previewWindowRows`, `capPreviewLines`, `formatMoreItems`, `formatExpandHint`).
 // pi's renderers use fixed budgets and their own marker wording; the helpers
 // here carry omp's shapes for the rebuilds below.
@@ -2311,7 +2373,7 @@ function retailOutputRows(
     // omp's bash window marker, byte for byte — counts are visual rows and
     // the plural is unconditional, exactly as its bash.ts writes them. The
     // parenthesized lowercase hint is omp's own inconsistency with its
-    // `⟨ctrl+o: Expand⟩` style elsewhere, kept for capture parity.
+    // `⟨Ctrl+O: Expand⟩` style elsewhere, kept for capture parity.
     tail =
       kept.length < visual.length
         ? [
@@ -3086,31 +3148,36 @@ function patchToolCallFraming(): void {
 
       // pi writes a tool's call as one logical line and its content after a
       // blank one, so the call is the leading run of non-blank rows — however
-      // many rows pi-tui wrapped it across. A long absolute path routinely
-      // takes three, and reading only the first row used to leave the target
-      // unfound: no name in the header, the path spelled across the body, and
-      // every rebuild below skipped because the call row was never claimed.
-      let callEnd = first;
-      while (callEnd < last && !isBlankRenderedLine(rawCall[callEnd])) callEnd++;
+      // many rows pi-tui wrapped it across. A long path routinely takes three,
+      // and reading only the first row used to leave the target unfound: no
+      // name in the header, the path spelled across the body, and every
+      // rebuild below skipped because the call row was never claimed.
+      //
+      // The run is cut where the call's own text ends, so a renderer that puts
+      // content straight under its call without pi's blank line leaves those
+      // rows behind rather than having them swallowed — what is left short of
+      // the end is what forbids the single-row collapse below.
+      const profilePath = profile?.contentPath?.(asToolArgs(this.args));
+      let runEnd = first;
+      while (runEnd < last && !isBlankRenderedLine(rawCall[runEnd])) runEnd++;
+      const callEnd = callRunEnd(rawCall, first, runEnd, this.toolName, profilePath);
       let bodyStart = callEnd;
       while (bodyStart < last && isBlankRenderedLine(rawCall[bodyStart])) bodyStart++;
 
-      // The row itself names the target when it fits on one; when it wrapped,
-      // only a tool that says where its path lives can still be read — and
-      // then it is rendered omp's way, relative to the directory it is in.
-      const wrapped = callEnd - first > 1;
-      const profilePath = profile?.contentPath?.(asToolArgs(this.args));
-      const target = wrapped
-        ? (profilePath ? displayToolPath(profilePath) : "")
+      // A tool that says where its path lives is named from `args`, so the
+      // header reads the same whether or not the row wrapped — and reads it
+      // omp's way, relative to the directory the session is in, where pi
+      // spells it from home. Anything else keeps whatever the row said.
+      const target = profilePath
+        ? `${displayToolPath(profilePath)}${profile?.targetSuffix?.(asToolArgs(this.args)) ?? ""}`
         : toolCallRowTarget(rawCall[first], this.toolName);
-      // omp marks a path target with its file glyph; a target that is not a
-      // path — a grep pattern, a URL — is left bare.
-      const targetGlyph = profilePath && target ? `${glyphs().node.scalar} ` : "";
+      // omp marks a path target with a glyph in `muted`, one per filetype;
+      // this carries the one file glyph rather than a devicon table.
+      const targetGlyph = profilePath && target ? `${fgAnsi(HEX.overlay1)}${glyphs().node.scalar}${FG_RESET} ` : "";
       const title = toolHeaderTitle(this);
       // Nothing but the call line: omp draws that as a single row, whatever
-      // number of rows pi needed for it. Only claimed for a tool whose path
-      // this reads from `args`, so an unrecognized body can never collapse.
-      const callOnly = bodyStart >= last && target !== "" && (!wrapped || profilePath !== undefined);
+      // number of rows pi needed for it.
+      const callOnly = bodyStart >= last && target !== "";
 
       framed =
         defaultBody !== undefined ||
@@ -3130,7 +3197,7 @@ function patchToolCallFraming(): void {
         // header the rebuild just cleaned up.
         if (target && !defaultBody && bodyStart < last) {
           // omp leaves the colon on the default foreground, not the label's.
-          framedHeader = `${iconPrefix}${fgAnsi(HEX_TOOL.accent)}${title}${FG_RESET}: ${fgAnsi(HEX_TOOL.accent)}${targetGlyph}${target}${FG_RESET}`;
+          framedHeader = `${iconPrefix}${fgAnsi(HEX_TOOL.accent)}${title}${FG_RESET}: ${targetGlyph}${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}`;
         } else {
           bodyStart = first;
         }
