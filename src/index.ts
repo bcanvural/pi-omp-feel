@@ -1683,14 +1683,93 @@ function bodyLooksLikeDiff(stripped: readonly StrippedRow[]): boolean {
   return stripped.some(row => DIFF_CHANGE_ROW.test(row.plain));
 }
 
-/** Give a diff body the omp treatment. */
-function renderDiffBody(stripped: readonly StrippedRow[]): readonly string[] {
-  return stripped.map(({ line, plain }) => {
-    const kind = classifyDiffRow(plain);
-    if (kind === "added" || kind === "removed") return glyphDiffIndent(line, DIFF_INDENT_AFTER_CHANGE);
-    if (kind === "context") return glyphDiffIndent(line, DIFF_INDENT_AFTER_CONTEXT);
-    return line;
-  });
+/** omp's collapsed-diff budget (`PREVIEW_LIMITS.DIFF_COLLAPSED_*`). */
+const DIFF_COLLAPSED_HUNKS = 8;
+const DIFF_COLLAPSED_LINES = 40;
+
+interface DiffBodyRow {
+  line: string;
+  plain: string;
+  kind: DiffRowKind;
+}
+
+/** Maximal runs of `+`/`-` rows. A wrapped continuation row splits its run in
+ * two, so this can overcount — the cap then bites a little early, which is the
+ * cheap side to be wrong on. */
+function countDiffHunks(rows: readonly DiffBodyRow[]): number {
+  let hunks = 0;
+  let inHunk = false;
+  for (const row of rows) {
+    const isChange = row.kind === "added" || row.kind === "removed";
+    if (isChange && !inHunk) hunks++;
+    inHunk = isChange;
+  }
+  return hunks;
+}
+
+/** omp's `truncateDiffByHunk`: a collapsed diff keeps 8 hunks / 40 rows. While
+ * it is still streaming the window tracks the tail so the newest hunks stay
+ * visible (omp's `fromTail`); settled, it keeps the head. Reversing the rows
+ * reuses the head walk for the tail case, exactly as omp does. */
+function capDiffRows(
+  rows: DiffBodyRow[],
+  fromTail: boolean,
+): { kept: DiffBodyRow[]; hiddenLines: number; hiddenHunks: number } {
+  if (rows.length <= DIFF_COLLAPSED_LINES && countDiffHunks(rows) <= DIFF_COLLAPSED_HUNKS) {
+    return { kept: rows, hiddenLines: 0, hiddenHunks: 0 };
+  }
+  if (fromTail) {
+    const reversed = capDiffRows([...rows].reverse(), false);
+    return { ...reversed, kept: reversed.kept.reverse() };
+  }
+  const kept: DiffBodyRow[] = [];
+  let keptHunks = 0;
+  let inHunk = false;
+  for (const row of rows) {
+    const isChange = row.kind === "added" || row.kind === "removed";
+    if (isChange && !inHunk) {
+      keptHunks++;
+      if (keptHunks > DIFF_COLLAPSED_HUNKS) break;
+    }
+    inHunk = isChange;
+    kept.push(row);
+    if (kept.length >= DIFF_COLLAPSED_LINES) break;
+  }
+  return {
+    kept,
+    hiddenLines: rows.length - kept.length,
+    hiddenHunks: countDiffHunks(rows) - countDiffHunks(kept),
+  };
+}
+
+/** Give a diff body the omp treatment: the collapsed cap, then indent glyphs. */
+function renderDiffBody(
+  stripped: readonly StrippedRow[],
+  expanded: boolean,
+  streaming: boolean,
+): readonly string[] {
+  const classified = stripped.map(({ line, plain }) => ({ line, plain, kind: classifyDiffRow(plain) }));
+  const { kept, hiddenLines, hiddenHunks } = expanded
+    ? { kept: classified, hiddenLines: 0, hiddenHunks: 0 }
+    : capDiffRows(classified, streaming);
+
+  const out: string[] = [];
+  const hunksNote = hiddenHunks > 0 ? ` (${hiddenHunks} hunk${hiddenHunks === 1 ? "" : "s"})` : "";
+  // A tail window hides its head, so its marker leads; a head window trails.
+  // The streaming marker matches omp's write-cell wording and drops the expand
+  // hint — mid-stream the window moves on its own.
+  if (hiddenLines > 0 && streaming) {
+    out.push(dimRow(`… (${hiddenLines} earlier line${hiddenLines === 1 ? "" : "s"}${hunksNote})`));
+  }
+  for (const row of kept) {
+    if (row.kind === "added" || row.kind === "removed") out.push(glyphDiffIndent(row.line, DIFF_INDENT_AFTER_CHANGE));
+    else if (row.kind === "context") out.push(glyphDiffIndent(row.line, DIFF_INDENT_AFTER_CONTEXT));
+    else out.push(row.line);
+  }
+  if (hiddenLines > 0 && !streaming) {
+    out.push(dimRow(`… ${hiddenLines} more line${hiddenLines === 1 ? "" : "s"}${hunksNote} ${EXPAND_HINT}`));
+  }
+  return out;
 }
 
 /** Structural view of the patched component (the compiled class fields are public). */
@@ -1936,7 +2015,7 @@ function patchToolCallFraming(): void {
         // Qualification needs one numbered change row, which file content shown
         // by other tools can in principle contain — the cost there is a stray
         // indent glyph, the same cheap-to-be-wrong trade the badge makes.
-        const diffBody = bodyLooksLikeDiff(body()) ? renderDiffBody(body()) : undefined;
+        const diffBody = bodyLooksLikeDiff(body()) ? renderDiffBody(body(), this.expanded, this.isPartial) : undefined;
         if (diffBody) {
           for (const row of diffBody) lines.push(frameBodyRow(row, width, borderColor, barBg));
         } else {
