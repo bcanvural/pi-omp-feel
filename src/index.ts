@@ -1262,6 +1262,9 @@ interface ToolProfile {
    * omp's dim-`$`, syntax-highlighted style instead of however the tool wrote
    * it. */
   command?(args: ToolArgs): string | undefined;
+  /** Where the file this tool touches lives in `args`, so rows showing that
+   * file can be highlighted in its language the way omp does. */
+  contentPath?(args: ToolArgs): string | undefined;
   /** Call-side detail for the dim `(a · b)` suffix that follows a command.
    * Built from `args` rather than parsed back out of the row being replaced, so
    * rewriting the row cannot silently drop something the tool wanted shown. */
@@ -1307,8 +1310,8 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
   // Keystrokes into a live session are not a command, so this one keeps a
   // header — but its output is still output, and belongs under a divider.
   ["write_stdin", { sections: true, wall: runbgWall }],
-  ["write", { summary: writeLineSummary }],
-  ["edit", { frameSelfRendered: true, summary: editDiffSummary }],
+  ["write", { summary: writeLineSummary, contentPath: pathFromArgs }],
+  ["edit", { frameSelfRendered: true, summary: editDiffSummary, contentPath: pathFromArgs }],
   // pi-ask. One question puts itself in the header via the usual target hoist;
   // several need saying, since only the first would otherwise be visible.
   ["ask", { iconless: true, summary: askQuestionSummary }],
@@ -1367,6 +1370,20 @@ function toolTitle(toolName: string): string {
 
 function asToolArgs(args: unknown): ToolArgs {
   return typeof args === "object" && args !== null ? (args as ToolArgs) : {};
+}
+
+/** pi's file tools accept both spellings (`file_path ?? path`, see its
+ * read/write/edit renderers); the same tool never sends both. */
+function pathFromArgs(args: ToolArgs): string | undefined {
+  if (typeof args.file_path === "string") return args.file_path;
+  if (typeof args.path === "string") return args.path;
+  return undefined;
+}
+
+/** The language omp would highlight this tool's file rows in. */
+function profileLanguage(profile: ToolProfile | undefined, args: unknown): string | undefined {
+  const path = profile?.contentPath?.(asToolArgs(args));
+  return path ? getLanguageFromPath(path) : undefined;
 }
 
 /** Split pi's `<tool> <target>` call row into its two halves, so both the
@@ -1742,11 +1759,52 @@ function capDiffRows(
   };
 }
 
-/** Give a diff body the omp treatment: the collapsed cap, then indent glyphs. */
+// Splits a raw context row into (background escapes)(pad)(context fg)(gutter),
+// so the rebuild keeps the gutter in the row's own colour and the box padding
+// behind. The fg run must be present — a row without one is left alone.
+const CONTEXT_ROW_PARTS = /^(?:\x1b\[[0-9;]*m)* ?((?:\x1b\[[0-9;]*m)+)(\s*\d+ )/;
+
+// The content of a context run never changes once rendered, but the block
+// re-renders on every state change — same bargain as `bashHighlightCache`.
+const contextHighlightCache = new Map<string, string[]>();
+const CONTEXT_HIGHLIGHT_CACHE_MAX = 64;
+
+function highlightContextCached(code: string, lang: string): string[] {
+  const key = `${lang} ${code}`;
+  const cached = contextHighlightCache.get(key);
+  if (cached !== undefined) return cached;
+  if (contextHighlightCache.size >= CONTEXT_HIGHLIGHT_CACHE_MAX) contextHighlightCache.clear();
+  const highlighted = highlightCode(code, lang);
+  contextHighlightCache.set(key, highlighted);
+  return highlighted;
+}
+
+/** omp syntax-highlights a diff's context lines (its changed lines stay flat
+ * red/green), batching each run of consecutive context rows into one highlight
+ * call so the tokenizer sees multi-line constructs whole — see omp `diff.ts`
+ * `highlightContextLines`. Gutters keep the context colour; a row that fails
+ * to split, or a run the highlighter miscounts, falls back to the glyphed
+ * original — content already showing is never put at risk. */
+function highlightContextRun(rows: readonly DiffBodyRow[], lang: string): string[] {
+  const contents = rows.map(row => row.plain.replace(DIFF_CONTEXT_ROW, ""));
+  const highlighted = highlightContextCached(contents.join("\n"), lang);
+  if (highlighted.length !== rows.length) {
+    return rows.map(row => glyphDiffIndent(row.line, DIFF_INDENT_AFTER_CONTEXT));
+  }
+  return rows.map((row, index) => {
+    const parts = CONTEXT_ROW_PARTS.exec(row.line);
+    if (!parts) return glyphDiffIndent(row.line, DIFF_INDENT_AFTER_CONTEXT);
+    return `${parts[1]}${parts[2]}${FG_RESET}${highlighted[index]}`;
+  });
+}
+
+/** Give a diff body the omp treatment: the collapsed cap, indent glyphs, and
+ * per-language context lines when the profile says which file this is. */
 function renderDiffBody(
   stripped: readonly StrippedRow[],
   expanded: boolean,
   streaming: boolean,
+  lang: string | undefined,
 ): readonly string[] {
   const classified = stripped.map(({ line, plain }) => ({ line, plain, kind: classifyDiffRow(plain) }));
   const { kept, hiddenLines, hiddenHunks } = expanded
@@ -1761,10 +1819,20 @@ function renderDiffBody(
   if (hiddenLines > 0 && streaming) {
     out.push(dimRow(`… (${hiddenLines} earlier line${hiddenLines === 1 ? "" : "s"}${hunksNote})`));
   }
-  for (const row of kept) {
+  let index = 0;
+  while (index < kept.length) {
+    const row = kept[index];
+    if (row.kind === "context" && lang !== undefined) {
+      let end = index;
+      while (end < kept.length && kept[end].kind === "context") end++;
+      out.push(...highlightContextRun(kept.slice(index, end), lang));
+      index = end;
+      continue;
+    }
     if (row.kind === "added" || row.kind === "removed") out.push(glyphDiffIndent(row.line, DIFF_INDENT_AFTER_CHANGE));
     else if (row.kind === "context") out.push(glyphDiffIndent(row.line, DIFF_INDENT_AFTER_CONTEXT));
     else out.push(row.line);
+    index++;
   }
   if (hiddenLines > 0 && !streaming) {
     out.push(dimRow(`… ${hiddenLines} more line${hiddenLines === 1 ? "" : "s"}${hunksNote} ${EXPAND_HINT}`));
@@ -2015,7 +2083,9 @@ function patchToolCallFraming(): void {
         // Qualification needs one numbered change row, which file content shown
         // by other tools can in principle contain — the cost there is a stray
         // indent glyph, the same cheap-to-be-wrong trade the badge makes.
-        const diffBody = bodyLooksLikeDiff(body()) ? renderDiffBody(body(), this.expanded, this.isPartial) : undefined;
+        const diffBody = bodyLooksLikeDiff(body())
+          ? renderDiffBody(body(), this.expanded, this.isPartial, profileLanguage(profile, this.args))
+          : undefined;
         if (diffBody) {
           for (const row of diffBody) lines.push(frameBodyRow(row, width, borderColor, barBg));
         } else {
@@ -2220,6 +2290,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     // entries are tiny and a name must always hash to the same accent.
     cachedWorkingFrames = undefined;
     bashHighlightCache.clear();
+    contextHighlightCache.clear();
   });
 }
 
