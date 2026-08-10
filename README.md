@@ -64,9 +64,9 @@ Some tools deserve better than that default, and `TOOL_PROFILES` in `src/index.t
 | `content` | where written content lives in `args`, so the body rebuilds as omp's write cell — dim gutter, tail-12 streaming, head-6 settled |
 | `resultText` | readable output in the tool result, so a one-line tool grows omp's three-line collapsed cell (`read` sets it) |
 | `startLine` | first line number of that output, for the cell's gutter (`read`'s `offset`) |
-| `output` | command output in the tool result, so a collapsed sections block re-tails it at omp's ten lines. A tool that windows its own output — runbg does, deliberately — must not set this |
+| `output` | command output in the tool result, so a collapsed sections block re-tails it at omp's ten lines. A tool that draws its own collapsed output window must not set this |
 
-`pi-runbg` ships profiled: `exec_command` is a shell command that outlives the call, so it gets exactly what omp gives bash, and `write_stdin` keeps its header because keystrokes are not a command. What omp has no vocabulary for — the session id, the log path — stays beside the badge rather than being folded into it. Its collapsed output window is runbg's own to draw and defaults to the same ten lines bash gets here, so the two block kinds match out of the box; `PI_RUNBG_PREVIEW_LINES` changes runbg's depth (pi's stock bash shows five), and neither package needs the other installed.
+Backgrounded-shell tools ship profiled: a command that outlives its call gets exactly what omp gives bash, and a keystroke stream into a live session keeps its header, because keystrokes are not a command. What omp has no vocabulary for — a session id, a log path — stays beside the badge rather than being folded into it. A tool that draws its own collapsed output window keeps it; the window's depth is that tool's setting, not this extension's.
 
 The extensions being described do not know this file exists and do not need to. Everything comes from `args`, which is structured, or from matching rows they already draw — and a match that fails leaves their own output showing rather than breaking the block. A profile is also ignored for a tool whose renderers are absent, which is what a transcript replayed after uninstalling that extension looks like.
 

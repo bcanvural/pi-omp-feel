@@ -1275,8 +1275,9 @@ interface ToolProfile {
    * highlighted, closed with `… N more lines` — where pi shows nothing. */
   resultText?(result: unknown): string | undefined;
   /** The command output in this tool's result, so a collapsed sections block
-   * can re-tail it at omp's depth (10 lines) instead of pi's five. A tool that
-   * windows its own output — runbg does, deliberately — must not set this. */
+   * can re-tail it at omp's depth (10 lines) instead of pi's five. A tool
+   * that draws its own collapsed output window must not set this — the
+   * window's depth is that tool's setting. */
   output?(result: unknown): string | undefined;
   /** First line number of that output, for the preview gutter (read's `offset`). */
   startLine?(args: ToolArgs): number;
