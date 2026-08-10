@@ -1274,6 +1274,10 @@ interface ToolProfile {
    * omp's collapsed content cell under its row — the first lines, gutted and
    * highlighted, closed with `… N more lines` — where pi shows nothing. */
   resultText?(result: unknown): string | undefined;
+  /** The command output in this tool's result, so a collapsed sections block
+   * can re-tail it at omp's depth (10 lines) instead of pi's five. A tool that
+   * windows its own output — runbg does, deliberately — must not set this. */
+  output?(result: unknown): string | undefined;
   /** First line number of that output, for the preview gutter (read's `offset`). */
   startLine?(args: ToolArgs): number;
   /** Call-side detail for the dim `(a · b)` suffix that follows a command.
@@ -1296,6 +1300,7 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
       sections: true,
       command: args => (typeof args.command === "string" ? args.command : undefined),
       wall: bashWall,
+      output: toolResultText,
     },
   ],
   // pi-runbg. `exec_command` is a shell command that happens to survive the
@@ -1940,6 +1945,84 @@ function renderContentBody(
   return rows;
 }
 
+/** omp's collapsed bash-output budget (`BASH_DEFAULT_PREVIEW_LINES`). */
+const OUTPUT_TAIL_LINES = 10;
+
+const outputTailCache = new Map<string, string[]>();
+const OUTPUT_TAIL_CACHE_MAX = 16;
+
+const OUTPUT_HINT_ROW = /^\.\.\. \(\d+ earlier lines?,/;
+const OUTPUT_WARNING_ROW = /^\[.*\]$/;
+const OUTPUT_TIMING_ROW = /^(?:Took|Elapsed)\s/;
+
+/** Rebuild pi's collapsed output window at omp's depth. pi keeps 5 visual
+ * lines behind a muted `... (N earlier lines, …)` row; omp keeps a
+ * viewport-capped 10. The full output still lives in the result, so the
+ * deeper tail is re-derived from it and swapped in over pi's window — the
+ * rows around it (timing, truncation warnings) stay put, and any shape
+ * surprise leaves pi's rows exactly as drawn. */
+function retailOutputRows(
+  rawResult: readonly string[],
+  profile: ToolProfile,
+  component: FramedToolComponent,
+  width: number,
+): readonly string[] {
+  // pi only draws the hint row when lines are hidden; without it the whole
+  // output is already visible and there is nothing to deepen.
+  let hintIndex = -1;
+  for (let i = 0; i < rawResult.length; i++) {
+    if (OUTPUT_HINT_ROW.test(stripAnsi(rawResult[i]).trim())) {
+      hintIndex = i;
+      break;
+    }
+  }
+  if (hintIndex === -1) return rawResult;
+
+  const text = profile.output?.(component.result);
+  if (!text) return rawResult;
+
+  // pi strips the persisted-output footer from settled renders; the raw
+  // result text still carries it, so mirror that strip (see pi's
+  // `rebuildBashResultRenderComponent`).
+  let output = text.trim();
+  const details = (component.result as { details?: { fullOutputPath?: unknown } } | undefined)?.details;
+  const fullOutputPath = details?.fullOutputPath;
+  if (!component.isPartial && typeof fullOutputPath === "string" && output.endsWith("]")) {
+    const footerStart = output.lastIndexOf("\n\n[");
+    if (footerStart !== -1 && output.slice(footerStart).includes(fullOutputPath)) {
+      output = output.slice(0, footerStart).trimEnd();
+    }
+  }
+  if (!output) return rawResult;
+
+  // The replaced span runs from the hint row to the trailing timing and
+  // warning rows, which belong to other parts of pi's layout.
+  const plainAt = (i: number): string => stripAnsi(rawResult[i]).trim();
+  let end = rawResult.length;
+  while (end > hintIndex + 1 && plainAt(end - 1).length === 0) end--;
+  if (end > hintIndex + 1 && OUTPUT_TIMING_ROW.test(plainAt(end - 1))) end--;
+  if (end > hintIndex + 1 && OUTPUT_WARNING_ROW.test(plainAt(end - 1))) end--;
+
+  // The tail keeps the colour pi gave it — read off the first row it drew.
+  const outFg = rawResult[hintIndex + 1]?.match(/\x1b\[38;(?:2|5);[0-9;]*m/)?.[0] ?? fgAnsi(HEX.overlay1);
+  const innerWidth = Math.max(1, width - 4);
+  const budget = Math.min(OUTPUT_TAIL_LINES, previewWindowRows());
+  const key = `${outFg} ${innerWidth} ${budget} ${output}`;
+  let tail = outputTailCache.get(key);
+  if (tail === undefined) {
+    if (outputTailCache.size >= OUTPUT_TAIL_CACHE_MAX) outputTailCache.clear();
+    const styled = output
+      .split("\n")
+      .map(line => `${outFg}${line.replace(/\t/g, "   ")}${FG_RESET}`)
+      .join("\n");
+    const visual = new Text(styled, 0, 0).render(innerWidth);
+    const kept = visual.slice(-budget);
+    tail = kept.length < visual.length ? [earlierLinesMarker(visual.length - kept.length), ...kept] : kept;
+    outputTailCache.set(key, tail);
+  }
+  return [...rawResult.slice(0, hintIndex), ...tail, ...rawResult.slice(end)];
+}
+
 /** omp's collapsed content-cell height (`PREVIEW_LIMITS.OUTPUT_COLLAPSED`). */
 const RESULT_PREVIEW_LINES = 3;
 
@@ -2008,7 +2091,7 @@ interface FramedToolComponent {
   executionStarted: boolean;
   /** `expanded` is pi's Ctrl+O toggle; the collapsed previews below key off it. */
   expanded: boolean;
-  result?: { isError?: boolean; content?: unknown };
+  result?: { isError?: boolean; content?: unknown; details?: unknown };
   toolName: string;
 }
 
@@ -2162,9 +2245,12 @@ function patchToolCallFraming(): void {
       // remove the Box's vertical padding and preserve that structure. A tool
       // that leads with something other than a command keeps its header.
       const callLines = renderCommandLines(rawCall, profile, this.args, this.expanded);
-      const resultLines = profile?.wall
-        ? profile.wall(stripRows(rawResult), asToolArgs(this.args))
+      const retailed = !this.expanded && profile?.output
+        ? retailOutputRows(rawResult, profile, this, width)
         : rawResult;
+      const resultLines = profile?.wall
+        ? profile.wall(stripRows(retailed), asToolArgs(this.args))
+        : retailed;
       lines.push(buildFrameBar(width, "top", profile?.headerless ? "" : header, borderColor, barBg));
       for (const line of callLines) {
         lines.push(renderFrameContentRow(line, width, borderColor, barBg));
@@ -2447,6 +2533,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     contextHighlightCache.clear();
     contentPreviewCache.clear();
     resultPreviewCache.clear();
+    outputTailCache.clear();
   });
 }
 
