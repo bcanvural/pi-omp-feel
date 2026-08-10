@@ -1633,6 +1633,66 @@ function toolResultText(result: unknown): string | undefined {
   return texts.length > 0 ? texts.join("\n") : undefined;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Diff rows
+//
+// pi renders a diff as one row per line — `+123 content` in `toolDiffAdded`,
+// `-123 content` in `toolDiffRemoved`, ` 123 content` in `toolDiffContext`,
+// and a digitless `...` row where context was skipped (pi `components/diff.ts`
+// + `generateDiffString`). omp draws the same rows with structural refinements
+// (indentation glyphs — omp `diff.ts` `visualizeIndent`), reproduced here for
+// any block whose body carries pi diff rows, whichever tool drew them.
+// ═══════════════════════════════════════════════════════════════════════════
+
+type DiffRowKind = "added" | "removed" | "context" | "gap" | "other";
+
+/** `+123 `/`-123 ` on the stripped, trimmed row. The digits are required: pi
+ * always numbers its diff rows, and raw `git diff` text (bare `+`/`-` markers)
+ * quoted in some tool's output must never qualify. */
+const DIFF_CHANGE_ROW = /^[+-]\s*\d+ /;
+/** ` 123 content` context rows — the marker space is gone from trimmed text. */
+const DIFF_CONTEXT_ROW = /^\d+ /;
+
+function classifyDiffRow(plain: string): DiffRowKind {
+  if (DIFF_CHANGE_ROW.test(plain)) return plain.startsWith("+") ? "added" : "removed";
+  if (plain === "...") return "gap";
+  if (DIFF_CONTEXT_ROW.test(plain)) return "context";
+  return "other";
+}
+
+// The raw-row anatomy both targets share: an optional background prefix and box
+// padding cell, the row's single foreground wrap, the marker+gutter, then the
+// content whose leading spaces are the indent. The lookahead accepts a visible
+// character or pi's inverse-on (a 1:1 replacement row starts its content with
+// `ESC[7m`), but not the closing escapes of an empty row — otherwise the
+// row's trailing padding would be glyphed.
+const DIFF_INDENT_AFTER_CHANGE = /^((?:\x1b\[[0-9;]*m)* ?(?:\x1b\[[0-9;]*m)*[+-]\s*\d+ )( +)(?=\x1b\[7m|[^\s\x1b])/;
+const DIFF_INDENT_AFTER_CONTEXT = /^((?:\x1b\[[0-9;]*m)* ?(?:\x1b\[[0-9;]*m)*\s*\d+ )( +)(?=\x1b\[7m|[^\s\x1b])/;
+
+/** omp's `visualizeIndent`, applied to a row pi already rendered: the indent
+ * run after the diff gutter becomes dim `·`s. Dim is a modifier (`ESC[2m`), so
+ * the row's diff colour runs through the glyphs untouched. pi flattens tabs to
+ * spaces before rendering, so omp's `→` tab marker is unreachable — a tab
+ * indents as `···`. */
+function glyphDiffIndent(row: string, target: RegExp): string {
+  return row.replace(target, (_, head: string, indent: string) => `${head}\x1b[2m${"·".repeat(indent.length)}\x1b[22m`);
+}
+
+/** True when a framed body is a pi diff — at least one numbered `+`/`-` row. */
+function bodyLooksLikeDiff(stripped: readonly StrippedRow[]): boolean {
+  return stripped.some(row => DIFF_CHANGE_ROW.test(row.plain));
+}
+
+/** Give a diff body the omp treatment. */
+function renderDiffBody(stripped: readonly StrippedRow[]): readonly string[] {
+  return stripped.map(({ line, plain }) => {
+    const kind = classifyDiffRow(plain);
+    if (kind === "added" || kind === "removed") return glyphDiffIndent(line, DIFF_INDENT_AFTER_CHANGE);
+    if (kind === "context") return glyphDiffIndent(line, DIFF_INDENT_AFTER_CONTEXT);
+    return line;
+  });
+}
+
 /** Structural view of the patched component (the compiled class fields are public). */
 interface FramedToolComponent {
   render: (width: number) => string[];
@@ -1859,19 +1919,30 @@ function patchToolCallFraming(): void {
           }
         }
 
-        // omp closes the header with a dim count of what the tool touched.
-        // Computed from the body only if a profile asks for it, so a large write
-        // is not walked twice per frame for a badge it does not have.
+        // The body is stripped once and shared by the summary badge and the
+        // diff detection below; both only run on a memo miss.
         let strippedBody: readonly StrippedRow[] | undefined;
-        const summary = profile?.summary?.(asToolArgs(this.args), () => {
+        const body = (): readonly StrippedRow[] => {
           strippedBody ??= stripRows(rawCall.slice(bodyStart, last));
           return strippedBody;
-        });
+        };
+        // omp closes the header with a dim count of what the tool touched.
+        const summary = profile?.summary?.(asToolArgs(this.args), body);
         if (summary) framedHeader += ` ${summary}`;
 
         lines.push(buildFrameBar(width, "top", framedHeader, borderColor, barBg));
-        for (let i = bodyStart; i < last; i++) {
-          lines.push(frameBodyRow(rawCall[i], width, borderColor, barBg));
+        // A body carrying pi diff rows gets omp's row treatment. The badge
+        // above counts the untreated rows, so it always reports the full diff.
+        // Qualification needs one numbered change row, which file content shown
+        // by other tools can in principle contain — the cost there is a stray
+        // indent glyph, the same cheap-to-be-wrong trade the badge makes.
+        const diffBody = bodyLooksLikeDiff(body()) ? renderDiffBody(body()) : undefined;
+        if (diffBody) {
+          for (const row of diffBody) lines.push(frameBodyRow(row, width, borderColor, barBg));
+        } else {
+          for (let i = bodyStart; i < last; i++) {
+            lines.push(frameBodyRow(rawCall[i], width, borderColor, barBg));
+          }
         }
       } else {
         lines.push(renderToolOneLine(rawCall[first], this.toolName));
