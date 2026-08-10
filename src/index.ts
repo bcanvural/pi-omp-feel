@@ -2496,7 +2496,7 @@ const TRAILING_NOTICE_LINE = /^\[.*\]$/;
  * `JSON.parse` alike, so the window below keeps the text's own indentation. */
 const JSON_DOCUMENT_LEAD = /^\s*[{[]/;
 
-/** Rows that notice may occupy, however long it is. */
+/** Rows the notice may occupy, however long it is. */
 const NOTICE_MAX_ROWS = 4;
 
 /** Clip from the middle, keeping both ends. A truncation notice earns this
@@ -2505,7 +2505,8 @@ const NOTICE_MAX_ROWS = 4;
  * keeping the line at all. */
 function clipMiddle(text: string, maxWidth: number): string {
   if (visibleWidth(text) <= maxWidth) return text;
-  if (maxWidth <= 1) return "…";
+  if (maxWidth <= 0) return "";
+  if (maxWidth === 1) return "…";
   const chars = [...text];
   const budget = maxWidth - 1;
   const headBudget = Math.ceil(budget / 2);
