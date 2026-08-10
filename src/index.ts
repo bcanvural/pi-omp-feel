@@ -1487,18 +1487,19 @@ function renderToolOneLine(target: string, title: string): string {
  * text is not that call (a renderer that puts content straight under it, an
  * unrecognized shape) yields the single row pi's layout gave before wrapped
  * calls were understood at all, leaving everything else in the body where it
- * cannot be swallowed. Anything pi appends past the path — a line range, an
- * expand hint — stays in the body on the rare row it spills onto. */
+ * cannot be swallowed. What pi appends past the path is part of that text
+ * too, so a line range that lands on its own row is still the call. */
 function callRunEnd(
   rows: readonly string[],
   first: number,
   runEnd: number,
   toolName: string,
   path: string | undefined,
+  suffix: string,
 ): number {
   const single = Math.min(runEnd, first + 1);
   if (path === undefined) return single;
-  const want = `${toolName}${shortenPath(path)}`.replace(/\s+/g, "");
+  const want = `${toolName}${shortenPath(path)}${suffix}`.replace(/\s+/g, "");
   let seen = "";
   for (let i = first; i < runEnd; i++) {
     seen += stripAnsi(rows[i]).replace(/\s+/g, "");
@@ -3158,9 +3159,10 @@ function patchToolCallFraming(): void {
       // rows behind rather than having them swallowed — what is left short of
       // the end is what forbids the single-row collapse below.
       const profilePath = profile?.contentPath?.(asToolArgs(this.args));
+      const profileSuffix = profilePath ? (profile?.targetSuffix?.(asToolArgs(this.args)) ?? "") : "";
       let runEnd = first;
       while (runEnd < last && !isBlankRenderedLine(rawCall[runEnd])) runEnd++;
-      const callEnd = callRunEnd(rawCall, first, runEnd, this.toolName, profilePath);
+      const callEnd = callRunEnd(rawCall, first, runEnd, this.toolName, profilePath, profileSuffix);
       let bodyStart = callEnd;
       while (bodyStart < last && isBlankRenderedLine(rawCall[bodyStart])) bodyStart++;
 
@@ -3168,9 +3170,14 @@ function patchToolCallFraming(): void {
       // header reads the same whether or not the row wrapped — and reads it
       // omp's way, relative to the directory the session is in, where pi
       // spells it from home. Anything else keeps whatever the row said.
+      // A tool that declares no path can only be read off the row, and a row
+      // that wrapped holds half its target — hoisting that would tear the call
+      // across the header and the body, so it stays whole where pi drew it.
       const target = profilePath
-        ? `${displayToolPath(profilePath)}${profile?.targetSuffix?.(asToolArgs(this.args)) ?? ""}`
-        : toolCallRowTarget(rawCall[first], this.toolName);
+        ? `${displayToolPath(profilePath)}${profileSuffix}`
+        : runEnd > first + 1
+          ? ""
+          : toolCallRowTarget(rawCall[first], this.toolName);
       // omp marks a path target with a glyph in `muted`, one per filetype;
       // this carries the one file glyph rather than a devicon table.
       const targetGlyph = profilePath && target ? `${fgAnsi(HEX.overlay1)}${glyphs().node.scalar}${FG_RESET} ` : "";
