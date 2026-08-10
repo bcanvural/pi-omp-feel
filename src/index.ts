@@ -1977,7 +1977,9 @@ function renderDiffBody(
     if (classified.length > budget) {
       kept = classified.slice(-budget);
       hiddenLines = classified.length - kept.length;
-      hiddenHunks = countDiffHunks(classified) - countDiffHunks(kept);
+      // Counted over the hidden prefix, as omp does — a hunk the window cuts
+      // in half is reported hidden, not shown.
+      hiddenHunks = countDiffHunks(classified.slice(0, hiddenLines));
     }
   } else if (!expanded) {
     ({ kept, hiddenLines, hiddenHunks } = capDiffRows(classified));
@@ -2105,9 +2107,9 @@ const OUTPUT_ROW_FG = /^\x1b\[38;(?:2|5);[0-9;]*m/;
  * warning row wrapping into fragments that individually look like nothing.
  * Output that merely *prints* warning- or timing-shaped text is output-
  * colored, stays inside the span, and is replaced by the rebuilt tail — so
- * it renders exactly once. (A theme whose warning color equals `toolOutput`
- * would fold the warning into the span; degenerate, and the cost is a
- * missing warning row behind an accurate marker.)
+ * it renders exactly once. (A theme whose warning or timing color equals
+ * `toolOutput` would fold that row into the span; degenerate, and the cost
+ * is a missing row behind an accurate marker.)
  *
  * Everything here fails toward pi's rows: no window row at index 0, no
  * extractable foreground, no result text — untouched, pi's 5-line look. */
@@ -2354,7 +2356,7 @@ function patchToolCallFraming(): void {
       (this.expanded ? 8 : 0) |
       // Collapsed previews are sized from the terminal height, and a
       // vertical-only resize changes no other memo key, so the window rides
-      // along in the high bits — already clamped to 8 bits at the source, so
+      // along in the high bits — already clamped to 10 bits at the source, so
       // the memoed value and the used depth cannot diverge.
       (previewWindowRows() << 4);
     const memo = frameMemo.get(this);
