@@ -11,6 +11,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFil
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SPINNER_CATEGORIES } from "./spinner-words.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // omp dark-catppuccin palette (pi's Theme can't express status-line colors,
@@ -223,27 +224,53 @@ const SETTINGS_FILE_NAME = "pi-omp-feel.json";
  * the settings file beside the glyph preset to turn it on. */
 let readPreviewEnabled = false;
 
-/** Remember the chosen preset across sessions. pi has no per-extension settings
+/** Whether the working line says something other than "Working…". Off by
+ * default: the words are a joke, and a joke belongs to whoever asked for it.
+ * `/omp-feel words on`. */
+let spinnerWordsEnabled = false;
+
+/** How the next word is chosen. `category` keeps to one theme and works
+ * through it, so a session reads as a run of jokes rather than a shuffle;
+ * `random` takes any word from any theme. `/omp-feel cycle …`. */
+type SpinnerCycle = "category" | "random";
+let spinnerCycle: SpinnerCycle = "category";
+
+function isSpinnerCycle(value: unknown): value is SpinnerCycle {
+  return value === "category" || value === "random";
+}
+
+/** Remember the chosen settings across sessions. pi has no per-extension
  * store, so keep a small file of our own beside the degrade report. */
-function loadGlyphPreset(): void {
+function loadSettings(): void {
   try {
     const path = join(getAgentDir(), SETTINGS_FILE_NAME);
     if (!existsSync(path)) return;
-    const stored = JSON.parse(readFileSync(path, "utf8")) as { glyphs?: unknown; readPreview?: unknown };
+    const stored = JSON.parse(readFileSync(path, "utf8")) as {
+      glyphs?: unknown;
+      readPreview?: unknown;
+      spinnerWords?: unknown;
+      spinnerCycle?: unknown;
+    };
     if (isGlyphPreset(stored.glyphs)) glyphPreset = stored.glyphs;
     if (typeof stored.readPreview === "boolean") readPreviewEnabled = stored.readPreview;
+    if (typeof stored.spinnerWords === "boolean") spinnerWordsEnabled = stored.spinnerWords;
+    if (isSpinnerCycle(stored.spinnerCycle)) spinnerCycle = stored.spinnerCycle;
   } catch {
     // An unreadable or malformed settings file must not stop the extension
     // loading; the default preset applies instead.
   }
 }
 
-function saveGlyphPreset(): void {
+function saveSettings(): void {
   try {
     mkdirSync(getAgentDir(), { recursive: true });
     writeFileSync(
       join(getAgentDir(), SETTINGS_FILE_NAME),
-      `${JSON.stringify({ glyphs: glyphPreset, readPreview: readPreviewEnabled }, null, 2)}\n`,
+      `${JSON.stringify(
+        { glyphs: glyphPreset, readPreview: readPreviewEnabled, spinnerWords: spinnerWordsEnabled, spinnerCycle },
+        null,
+        2,
+      )}\n`,
     );
   } catch {
     // Persisting is best effort — the choice still holds for this session.
@@ -253,7 +280,7 @@ function saveGlyphPreset(): void {
 function applyGlyphPreset(preset: GlyphPreset): void {
   if (glyphPreset === preset) return;
   glyphPreset = preset;
-  saveGlyphPreset();
+  saveSettings();
   // Framed tool blocks fold the preset into their memo key, so they refresh
   // themselves. The status bar and the editor's top border need telling.
   activeFooter?.invalidate();
@@ -695,8 +722,15 @@ const SHIMMER_CELLS_PER_FRAME = (SHIMMER_SPEED_CELLS_PER_S * WORKING_FRAME_MS) /
 const SPINNER_ADVANCE_MS = 80;
 const SPINNER_FRAMES_PER_GLYPH = SPINNER_ADVANCE_MS / WORKING_FRAME_MS;
 /** omp's `CLASSIC_PADDING`: cells of dark either side of the strip, which is
- * the pause between sweeps. */
-const SHIMMER_PADDING = 10;
+ * the pause between sweeps. omp animates by clock and can hold this at ten;
+ * a baked list has to close on a whole number of both cycles, and the period
+ * decides how many frames that takes — 82 cells needs 820 frames where 96
+ * needs 80. So the gap is chosen per label from a range either side of omp's
+ * ten, which is imperceptible to look at and the difference between a list of
+ * a few hundred kilobytes and one of several megabytes. */
+const SHIMMER_PADDING_PREFERRED = 10;
+const SHIMMER_PADDING_MIN = 8;
+const SHIMMER_PADDING_MAX = 20;
 /** omp's `CLASSIC_BAND_HALF_WIDTH` and its two intensity thresholds. */
 const SHIMMER_BAND_HALF_WIDTH = 6;
 const SHIMMER_TIER_HIGH = 0.65;
@@ -712,17 +746,125 @@ export const ACTIVITY_CHANNEL = "ui:activity";
 let activityLabel: string | undefined;
 
 function workingLabel(): string {
-  return activityLabel ?? OMP_WORKING_TEXT;
+  return activityLabel ?? spinnerWord ?? OMP_WORKING_TEXT;
 }
 
-/** Cells the band travels across: the label, the joining space, and the hint. */
+// ───────────────────────────────────────────────────────────────────────────
+// Spinner words
+//
+// omp says "Working…" and means it. These say something sillier, one word per
+// turn, and the shimmer sweeps whatever they say. Off unless asked for.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** The word this turn is working under, if any. */
+let spinnerWord: string | undefined;
+/** The theme `category` cycling is working through, and what is left of it. */
+let spinnerQueue: string[] = [];
+let spinnerQueueCategory: string | undefined;
+
+const SPINNER_CATEGORY_NAMES = Object.keys(SPINNER_CATEGORIES);
+
+/** How wide a word the working line will carry. The Loader wraps rather than
+ * overflows, and a wrapped line pushes the editor down a row, so the longer
+ * phrases are elided to fit beside the spinner and the hint. */
+function spinnerWordMaxWidth(): number {
+  const columns = process.stdout.columns || 80;
+  return Math.max(12, Math.min(56, columns - (2 + 1 + visibleWidth(OMP_WORKING_HINT) + 4)));
+}
+
+function shuffled<T>(items: readonly T[]): T[] {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+/** The next word, by whichever rule is set. A theme is worked through in a
+ * shuffled order and only swapped once exhausted, so consecutive turns stay in
+ * the same joke without repeating inside it. */
+function nextSpinnerWord(): string | undefined {
+  if (SPINNER_CATEGORY_NAMES.length === 0) return undefined;
+  if (spinnerCycle === "random") {
+    const category = SPINNER_CATEGORY_NAMES[Math.floor(Math.random() * SPINNER_CATEGORY_NAMES.length)];
+    const words = SPINNER_CATEGORIES[category] ?? [];
+    return words.length > 0 ? words[Math.floor(Math.random() * words.length)] : undefined;
+  }
+  if (spinnerQueue.length === 0) {
+    const candidates =
+      SPINNER_CATEGORY_NAMES.length > 1
+        ? SPINNER_CATEGORY_NAMES.filter(name => name !== spinnerQueueCategory)
+        : SPINNER_CATEGORY_NAMES;
+    spinnerQueueCategory = candidates[Math.floor(Math.random() * candidates.length)];
+    spinnerQueue = shuffled(SPINNER_CATEGORIES[spinnerQueueCategory] ?? []);
+  }
+  return spinnerQueue.pop();
+}
+
+/** Dress a word the way "Working…" is dressed — an ellipsis, unless it already
+ * ends in punctuation of its own, since some of the longer lines are whole
+ * sentences and `Agree?…` reads as a typo. */
+function decorateSpinnerWord(word: string): string {
+  const clipped = clipPlain(sanitizeStatusText(word), spinnerWordMaxWidth());
+  return /[.!?…:]$/.test(clipped) ? clipped : `${clipped}…`;
+}
+
+/** Choose the word for the turn that is starting. */
+function refreshSpinnerWord(): void {
+  if (!spinnerWordsEnabled) {
+    spinnerWord = undefined;
+    return;
+  }
+  const word = nextSpinnerWord();
+  spinnerWord = word === undefined ? undefined : decorateSpinnerWord(word);
+}
+
+/** Cells the band travels across: the label, the joining space, and the hint —
+ * rounded up to an even count. The gap either side is always even, so an odd
+ * strip forces an odd period, and odd periods are exactly the ones whose lists
+ * run long (a 31-cell strip needs 340 frames where 32 needs 40). The extra
+ * cell is a trailing space: nothing to look at, an order of magnitude to
+ * store. */
 function shimmerCells(label: string): number {
-  return [...label].length + 1 + [...OMP_WORKING_HINT].length;
+  const strip = [...label].length + 1 + [...OMP_WORKING_HINT].length;
+  return strip % 2 === 0 ? strip : strip + 1;
 }
 
-/** One full cycle in cells: the strip plus omp's dark padding either side. */
+/** Frames a list must hold for a band of this period to close cleanly. */
+function shimmerFrameCountFor(period: number): number {
+  const stepNumerator = Math.round(SHIMMER_CELLS_PER_FRAME * 5);
+  const periodFifths = period * 5;
+  const bandFrames = periodFifths / greatestCommonDivisor(stepNumerator, periodFifths);
+  return leastCommonMultiple(OMP_WORKING_FRAMES.length * SPINNER_FRAMES_PER_GLYPH, bandFrames);
+}
+
+// The padding depends only on the label's width, and every frame of every
+// build asks for it.
+const shimmerPaddingCache = new Map<number, number>();
+
+/** The dark gap that makes this label's list shortest, nearest omp's ten. */
+function shimmerPadding(cells: number): number {
+  const cached = shimmerPaddingCache.get(cells);
+  if (cached !== undefined) return cached;
+  let best = SHIMMER_PADDING_PREFERRED;
+  let bestFrames = Number.POSITIVE_INFINITY;
+  for (let padding = SHIMMER_PADDING_MIN; padding <= SHIMMER_PADDING_MAX; padding++) {
+    const frames = shimmerFrameCountFor(cells + 2 * padding);
+    const closer = Math.abs(padding - SHIMMER_PADDING_PREFERRED) < Math.abs(best - SHIMMER_PADDING_PREFERRED);
+    if (frames < bestFrames || (frames === bestFrames && closer)) {
+      best = padding;
+      bestFrames = frames;
+    }
+  }
+  shimmerPaddingCache.set(cells, best);
+  return best;
+}
+
+/** One full cycle in cells: the strip plus the dark padding either side. */
 function shimmerPeriod(label: string): number {
-  return shimmerCells(label) + 2 * SHIMMER_PADDING;
+  const cells = shimmerCells(label);
+  return cells + 2 * shimmerPadding(cells);
 }
 
 function greatestCommonDivisor(a: number, b: number): number {
@@ -742,11 +884,7 @@ function leastCommonMultiple(a: number, b: number): number {
 // fifths of a cell (`SHIMMER_CELLS_PER_FRAME` is 6/5 at these constants): the
 // list closes on the first frame where a whole number of periods has passed.
 function workingFrameCount(label: string): number {
-  const stepNumerator = Math.round(SHIMMER_CELLS_PER_FRAME * 5);
-  const periodFifths = shimmerPeriod(label) * 5;
-  const bandFrames = periodFifths / greatestCommonDivisor(stepNumerator, periodFifths);
-  const spinnerFrames = OMP_WORKING_FRAMES.length * SPINNER_FRAMES_PER_GLYPH;
-  return leastCommonMultiple(spinnerFrames, bandFrames);
+  return shimmerFrameCountFor(shimmerPeriod(label));
 }
 
 function workingAccent(ctx: ExtensionContext): string {
@@ -763,13 +901,15 @@ function shimmerIntensity(distance: number): number {
 function workingMessage(label: string, accent: string, frame: number): string {
   const labelCells = [...label];
   const cells = [...labelCells, " ", ...OMP_WORKING_HINT];
+  while (cells.length < shimmerCells(label)) cells.push(" ");
   // The band's own position, un-floored as omp leaves it, so a fractional step
   // reads as smooth movement rather than a stutter every few frames.
+  const padding = shimmerPadding(cells.length);
   const position = (frame * SHIMMER_CELLS_PER_FRAME) % shimmerPeriod(label);
 
   return cells
     .map((character, index) => {
-      const distance = Math.abs(index + SHIMMER_PADDING - position);
+      const distance = Math.abs(index + padding - position);
       const intensity = shimmerIntensity(distance);
       // The hint peaks lavender; the label peaks in the session accent.
       const peak = index > labelCells.length ? HEX.lavender : accent;
@@ -3361,12 +3501,16 @@ const GLYPH_PRESET_NAMES: readonly GlyphPreset[] = ["nerd", "unicode"];
 // setting in its name — matching how pi's bundled extensions namespace theirs.
 const COMMAND_NAME = "omp-feel";
 const GLYPH_SUBCOMMAND = "glyphs";
+const WORDS_SUBCOMMAND = "words";
+const CYCLE_SUBCOMMAND = "cycle";
+const WORDS_VALUES = ["on", "off"] as const;
+const CYCLE_VALUES: readonly SpinnerCycle[] = ["category", "random"];
 const GLYPH_FLAG = "omp-feel-glyphs";
 const GLYPH_STATUS_KEY = "omp-feel-glyphs";
 
 export default function ompFeelExtension(pi: ExtensionAPI) {
   patchToolCallFraming();
-  loadGlyphPreset();
+  loadSettings();
 
   pi.registerFlag(GLYPH_FLAG, {
     type: "string",
@@ -3374,27 +3518,82 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand(COMMAND_NAME, {
-    description: `omp styling settings — ${GLYPH_SUBCOMMAND} <${GLYPH_PRESET_NAMES.join("|")}>`,
+    description:
+      `omp styling settings — ${GLYPH_SUBCOMMAND} <${GLYPH_PRESET_NAMES.join("|")}>` +
+      ` · ${WORDS_SUBCOMMAND} <${WORDS_VALUES.join("|")}> · ${CYCLE_SUBCOMMAND} <${CYCLE_VALUES.join("|")}>`,
     getArgumentCompletions: (argumentPrefix) => {
       const prefix = argumentPrefix.trimStart();
-      const preset = (name: GlyphPreset): AutocompleteItem => ({
+      const value = (name: string, current: boolean): AutocompleteItem => ({
         value: name,
         label: name,
-        description: name === glyphPreset ? "current" : "",
+        description: current ? "current" : "",
       });
-      // Once the subcommand is typed, only presets remain; before that, offer
-      // both so `/omp-feel nerd` works as a shorthand.
-      if (prefix.startsWith(`${GLYPH_SUBCOMMAND} `)) {
-        const rest = prefix.slice(GLYPH_SUBCOMMAND.length + 1).trimStart();
-        return GLYPH_PRESET_NAMES.filter(name => name.startsWith(rest)).map(preset);
-      }
-      const items: AutocompleteItem[] = GLYPH_SUBCOMMAND.startsWith(prefix)
-        ? [{ value: GLYPH_SUBCOMMAND, label: GLYPH_SUBCOMMAND, description: `currently ${glyphPreset}` }]
-        : [];
-      return [...items, ...GLYPH_PRESET_NAMES.filter(name => name.startsWith(prefix)).map(preset)];
+      // Once a subcommand is typed, only its own values remain.
+      const sub = (name: string, values: readonly string[], current: string): AutocompleteItem[] | undefined => {
+        if (!prefix.startsWith(`${name} `)) return undefined;
+        const rest = prefix.slice(name.length + 1).trimStart();
+        return values.filter(v => v.startsWith(rest)).map(v => value(v, v === current));
+      };
+      const wordsState = spinnerWordsEnabled ? "on" : "off";
+      return (
+        sub(GLYPH_SUBCOMMAND, GLYPH_PRESET_NAMES, glyphPreset) ??
+        sub(WORDS_SUBCOMMAND, WORDS_VALUES, wordsState) ??
+        sub(CYCLE_SUBCOMMAND, CYCLE_VALUES, spinnerCycle) ?? [
+          // Before that, the subcommands, plus the presets on their own so
+          // `/omp-feel nerd` keeps working as the shorthand it always was.
+          ...[
+            [GLYPH_SUBCOMMAND, glyphPreset],
+            [WORDS_SUBCOMMAND, wordsState],
+            [CYCLE_SUBCOMMAND, spinnerCycle],
+          ]
+            .filter(([name]) => name.startsWith(prefix))
+            .map(([name, state]) => ({ value: `${name} `, label: name, description: `currently ${state}` })),
+          ...GLYPH_PRESET_NAMES.filter(name => name.startsWith(prefix)).map(name => value(name, name === glyphPreset)),
+        ]
+      );
     },
     handler: async (args, ctx) => {
       const words = args.trim().split(/\s+/).filter(Boolean);
+
+      if (words[0] === WORDS_SUBCOMMAND) {
+        const choice = words[1] ?? (spinnerWordsEnabled ? "off" : "on");
+        if (choice !== "on" && choice !== "off") {
+          ctx.ui.setStatus(GLYPH_STATUS_KEY, `omp-feel: say \`${WORDS_SUBCOMMAND} on\` or \`${WORDS_SUBCOMMAND} off\``);
+          return;
+        }
+        spinnerWordsEnabled = choice === "on";
+        // The turn already under way keeps whatever it started with; the
+        // change is for the next one.
+        if (!spinnerWordsEnabled) spinnerWord = undefined;
+        spinnerQueue = [];
+        saveSettings();
+        ctx.ui.setStatus(
+          GLYPH_STATUS_KEY,
+          spinnerWordsEnabled
+            ? `omp-feel: spinner words on — ${SPINNER_CATEGORY_NAMES.length} themes, cycling by ${spinnerCycle}`
+            : "omp-feel: spinner words off — back to Working…",
+        );
+        return;
+      }
+
+      if (words[0] === CYCLE_SUBCOMMAND) {
+        const choice = words[1];
+        if (!isSpinnerCycle(choice)) {
+          ctx.ui.setStatus(GLYPH_STATUS_KEY, `omp-feel: cycle is ${CYCLE_VALUES.join(" or ")}`);
+          return;
+        }
+        spinnerCycle = choice;
+        spinnerQueue = [];
+        saveSettings();
+        ctx.ui.setStatus(
+          GLYPH_STATUS_KEY,
+          choice === "category"
+            ? "omp-feel: cycling one theme at a time"
+            : "omp-feel: picking from every theme at random",
+        );
+        return;
+      }
+
       if (words[0] === GLYPH_SUBCOMMAND) words.shift();
 
       // Nothing left to act on opens pi's own picker, so the setting is reachable
@@ -3482,6 +3681,8 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeTui?.requestRender();
   });
   pi.on("agent_start", () => {
+    // One word per turn, picked before the frames are built around it.
+    refreshSpinnerWord();
     if (currentCtx?.mode === "tui" && currentCtx.hasUI) configureWorkingIndicator(currentCtx);
     activeTui?.requestRender();
   });
