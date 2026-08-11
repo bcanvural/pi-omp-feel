@@ -444,17 +444,6 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Beet-farming", "Jim-pranking", "Shuffling paper", "Botching math", "Midnight screening", "Dundie-awarding",
     "Snatching pretzels",
   ],
-  // Theme Park Operations (43)
-  themeParkOperations: [
-    "Backstaging", "Block-checking", "Break-rotating", "Churro-stocking", "Confiscating", "Costume-adjusting",
-    "Crowd-herding", "E-stopping", "Escorting", "Evacuating", "Float-pushing", "Gate-latching", "Guest-recovering",
-    "Height-measuring", "Lap-bar-tugging", "Mascot-wrangling", "Monorail-towing", "Overlay-hanging",
-    "Parade-marshaling", "Placating", "Platform-manning", "Power-washing", "Pyro-loading", "Radioing", "Re-railing",
-    "Re-strapping", "Re-theming", "Restraint-checking", "Rope-dropping", "Seatbelt-tugging", "Single-rider-merging",
-    "Spieling", "Spill-coning", "Stamp-checking", "Stanchion-shifting", "Stroller-stowing", "Switchbacking",
-    "Track-walking", "Tram-directing", "Tunnel-patrolling", "Turkey-leg-thawing", "Turnstile-unjamming",
-    "Wristbanding",
-  ],
   // Trading / Crypto (11)
   tradingCrypto: [
     "Hodling", "Longing", "Shorting", "Staking", "Mining", "Minting", "Degening", "Apeing", "Mooning",
