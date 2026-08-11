@@ -3181,7 +3181,11 @@ function patchToolCallFraming(): void {
       // tearing the call across the header and the body. pi spells some reads
       // its own way (`read resource …`, `[skill] …`), which is exactly the
       // case that lands here.
-      const target = profilePath && call.matched
+      // A call the walk did not recognize can still be named when it occupies
+      // exactly one row: there is no second row of it to leave behind, so
+      // nothing can be torn. That is what gives pi's own spellings — a
+      // `[skill] …` read among them — their file name back.
+      const target = profilePath && (call.matched || runEnd === first + 1)
         ? `${displayToolPath(profilePath)}${profileSuffix}`
         : runEnd > first + 1
           ? ""
