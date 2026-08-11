@@ -235,6 +235,10 @@ let spinnerWordsEnabled = false;
 type SpinnerCycle = "category" | "random";
 let spinnerCycle: SpinnerCycle = "category";
 
+/** Whatever else the settings file held. Rewriting only the keys this version
+ * knows would drop a key a later one added, or one written by hand. */
+let storedSettings: Record<string, unknown> = {};
+
 function isSpinnerCycle(value: unknown): value is SpinnerCycle {
   return value === "category" || value === "random";
 }
@@ -245,7 +249,10 @@ function loadSettings(): void {
   try {
     const path = join(getAgentDir(), SETTINGS_FILE_NAME);
     if (!existsSync(path)) return;
-    const stored = JSON.parse(readFileSync(path, "utf8")) as {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
+    storedSettings = parsed as Record<string, unknown>;
+    const stored = storedSettings as {
       glyphs?: unknown;
       readPreview?: unknown;
       spinnerWords?: unknown;
@@ -267,7 +274,13 @@ function saveSettings(): void {
     writeFileSync(
       join(getAgentDir(), SETTINGS_FILE_NAME),
       `${JSON.stringify(
-        { glyphs: glyphPreset, readPreview: readPreviewEnabled, spinnerWords: spinnerWordsEnabled, spinnerCycle },
+        {
+          ...storedSettings,
+          glyphs: glyphPreset,
+          readPreview: readPreviewEnabled,
+          spinnerWords: spinnerWordsEnabled,
+          spinnerCycle,
+        },
         null,
         2,
       )}\n`,
@@ -718,9 +731,18 @@ const OMP_WORKING_HINT = "⟨esc⟩";
 // spinner advances every other frame to hold its own.
 const SHIMMER_SPEED_CELLS_PER_S = 30;
 const WORKING_FRAME_MS = 40;
-const SHIMMER_CELLS_PER_FRAME = (SHIMMER_SPEED_CELLS_PER_S * WORKING_FRAME_MS) / 1000;
-const SPINNER_ADVANCE_MS = 80;
-const SPINNER_FRAMES_PER_GLYPH = SPINNER_ADVANCE_MS / WORKING_FRAME_MS;
+// The band's step as an exact fraction of a cell, reduced from the constants
+// above rather than assumed. The frame count below divides by the denominator,
+// so a step that is not a whole fraction would close the loop mid-sweep — and
+// a rounded one would hide that rather than show it.
+const SHIMMER_STEP_DIVISOR = greatestCommonDivisor(SHIMMER_SPEED_CELLS_PER_S * WORKING_FRAME_MS, 1000);
+const SHIMMER_STEP_NUMERATOR = (SHIMMER_SPEED_CELLS_PER_S * WORKING_FRAME_MS) / SHIMMER_STEP_DIVISOR;
+const SHIMMER_STEP_DENOMINATOR = 1000 / SHIMMER_STEP_DIVISOR;
+const SHIMMER_CELLS_PER_FRAME = SHIMMER_STEP_NUMERATOR / SHIMMER_STEP_DENOMINATOR;
+// Whole frames per glyph by construction, so the spinner cannot fall between
+// two of them; omp's 80 ms is what this pair comes to.
+const SPINNER_FRAMES_PER_GLYPH = 2;
+const SPINNER_ADVANCE_MS = WORKING_FRAME_MS * SPINNER_FRAMES_PER_GLYPH;
 /** omp's `CLASSIC_PADDING`: cells of dark either side of the strip, which is
  * the pause between sweeps. omp animates by clock and can hold this at ten;
  * a baked list has to close on a whole number of both cycles, and the period
@@ -763,11 +785,17 @@ let spinnerQueue: string[] = [];
 let spinnerQueueCategory: string | undefined;
 
 const SPINNER_CATEGORY_NAMES = Object.keys(SPINNER_CATEGORIES);
+/** Every word once, so `random` is uniform over words rather than over themes
+ * — themes run from seven words to forty-five, which made a chemistry word six
+ * times likelier than a spacefaring one. */
+const SPINNER_ALL_WORDS = SPINNER_CATEGORY_NAMES.flatMap(name => [...(SPINNER_CATEGORIES[name] ?? [])]);
+/** The word showing, so the next draw can avoid repeating it. */
+let spinnerLastWord: string | undefined;
 
 /** How wide a word the working line will carry. The Loader wraps rather than
  * overflows, and a wrapped line pushes the editor down a row, so the longer
  * phrases are elided to fit beside the spinner and the hint. */
-function spinnerWordMaxWidth(): number {
+function workingLabelMaxWidth(): number {
   const columns = process.stdout.columns || 80;
   return Math.max(12, Math.min(56, columns - (2 + 1 + visibleWidth(OMP_WORKING_HINT) + 4)));
 }
@@ -787,9 +815,12 @@ function shuffled<T>(items: readonly T[]): T[] {
 function nextSpinnerWord(): string | undefined {
   if (SPINNER_CATEGORY_NAMES.length === 0) return undefined;
   if (spinnerCycle === "random") {
-    const category = SPINNER_CATEGORY_NAMES[Math.floor(Math.random() * SPINNER_CATEGORY_NAMES.length)];
-    const words = SPINNER_CATEGORIES[category] ?? [];
-    return words.length > 0 ? words[Math.floor(Math.random() * words.length)] : undefined;
+    if (SPINNER_ALL_WORDS.length === 0) return undefined;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const word = SPINNER_ALL_WORDS[Math.floor(Math.random() * SPINNER_ALL_WORDS.length)];
+      if (word !== spinnerLastWord || SPINNER_ALL_WORDS.length === 1) return word;
+    }
+    return SPINNER_ALL_WORDS[Math.floor(Math.random() * SPINNER_ALL_WORDS.length)];
   }
   if (spinnerQueue.length === 0) {
     const candidates =
@@ -802,11 +833,11 @@ function nextSpinnerWord(): string | undefined {
   return spinnerQueue.pop();
 }
 
-/** Dress a word the way "Working…" is dressed — an ellipsis, unless it already
- * ends in punctuation of its own, since some of the longer lines are whole
- * sentences and `Agree?…` reads as a typo. */
+/** Dress a word the way "Working…" is dressed — an ellipsis, unless the word
+ * already ends in punctuation, which today means only one the clip shortened
+ * and finished with an ellipsis of its own. */
 function decorateSpinnerWord(word: string): string {
-  const clipped = clipPlain(sanitizeStatusText(word), spinnerWordMaxWidth());
+  const clipped = clipPlain(sanitizeStatusText(word), workingLabelMaxWidth());
   return /[.!?…:]$/.test(clipped) ? clipped : `${clipped}…`;
 }
 
@@ -817,6 +848,7 @@ function refreshSpinnerWord(): void {
     return;
   }
   const word = nextSpinnerWord();
+  spinnerLastWord = word;
   spinnerWord = word === undefined ? undefined : decorateSpinnerWord(word);
 }
 
@@ -859,8 +891,7 @@ function startSpinnerRotation(): void {
  * rounded up to an even count. The gap either side is always even, so an odd
  * strip forces an odd period, and odd periods are exactly the ones whose lists
  * run long (a 31-cell strip needs 340 frames where 32 needs 40). The extra
- * cell is a trailing space: nothing to look at, an order of magnitude to
- * store. */
+ * cell is never drawn; it only lets the band travel over an even period. */
 function shimmerCells(label: string): number {
   const strip = [...label].length + 1 + [...OMP_WORKING_HINT].length;
   return strip % 2 === 0 ? strip : strip + 1;
@@ -868,9 +899,8 @@ function shimmerCells(label: string): number {
 
 /** Frames a list must hold for a band of this period to close cleanly. */
 function shimmerFrameCountFor(period: number): number {
-  const stepNumerator = Math.round(SHIMMER_CELLS_PER_FRAME * 5);
-  const periodFifths = period * 5;
-  const bandFrames = periodFifths / greatestCommonDivisor(stepNumerator, periodFifths);
+  const periodUnits = period * SHIMMER_STEP_DENOMINATOR;
+  const bandFrames = periodUnits / greatestCommonDivisor(SHIMMER_STEP_NUMERATOR, periodUnits);
   return leastCommonMultiple(OMP_WORKING_FRAMES.length * SPINNER_FRAMES_PER_GLYPH, bandFrames);
 }
 
@@ -878,22 +908,41 @@ function shimmerFrameCountFor(period: number): number {
 // build asks for it.
 const shimmerPaddingCache = new Map<number, number>();
 
-/** The dark gap that makes this label's list shortest, nearest omp's ten. */
+/** Frames a label may cost before its gap is allowed to drift from omp's. */
+const SHIMMER_FRAME_BUDGET = 200;
+
+/** The gap nearest omp's ten whose list fits the budget — not the shortest
+ * list going. Minimising outright put the default label on seventeen, which
+ * is a 1.6-second sweep where omp's ten gives 1.13: a fifth of a second is
+ * nothing to store and everything to look at, on the one label every session
+ * shows. Within the budget the gap never drifts more than a cell. */
 function shimmerPadding(cells: number): number {
   const cached = shimmerPaddingCache.get(cells);
   if (cached !== undefined) return cached;
-  let best = SHIMMER_PADDING_PREFERRED;
+  let best: number | undefined;
   let bestFrames = Number.POSITIVE_INFINITY;
+  let smallest = SHIMMER_PADDING_PREFERRED;
+  let smallestFrames = Number.POSITIVE_INFINITY;
   for (let padding = SHIMMER_PADDING_MIN; padding <= SHIMMER_PADDING_MAX; padding++) {
     const frames = shimmerFrameCountFor(cells + 2 * padding);
-    const closer = Math.abs(padding - SHIMMER_PADDING_PREFERRED) < Math.abs(best - SHIMMER_PADDING_PREFERRED);
-    if (frames < bestFrames || (frames === bestFrames && closer)) {
+    if (frames < smallestFrames) {
+      smallest = padding;
+      smallestFrames = frames;
+    }
+    if (frames > SHIMMER_FRAME_BUDGET) continue;
+    const closer =
+      best === undefined ||
+      Math.abs(padding - SHIMMER_PADDING_PREFERRED) < Math.abs(best - SHIMMER_PADDING_PREFERRED);
+    if (closer) {
       best = padding;
       bestFrames = frames;
     }
   }
-  shimmerPaddingCache.set(cells, best);
-  return best;
+  // Nothing within budget: take the shortest list there is.
+  const chosen = best ?? smallest;
+  void bestFrames;
+  shimmerPaddingCache.set(cells, chosen);
+  return chosen;
 }
 
 /** One full cycle in cells: the strip plus the dark padding either side. */
@@ -936,10 +985,11 @@ function shimmerIntensity(distance: number): number {
 function workingMessage(label: string, accent: string, frame: number): string {
   const labelCells = [...label];
   const cells = [...labelCells, " ", ...OMP_WORKING_HINT];
-  while (cells.length < shimmerCells(label)) cells.push(" ");
   // The band's own position, un-floored as omp leaves it, so a fractional step
   // reads as smooth movement rather than a stutter every few frames.
-  const padding = shimmerPadding(cells.length);
+  // Sized on the even count the period uses, though only the real cells are
+  // drawn — a trailing pad cell is one column wide and wraps the line.
+  const padding = shimmerPadding(shimmerCells(label));
   const position = (frame * SHIMMER_CELLS_PER_FRAME) % shimmerPeriod(label);
 
   return cells
@@ -1692,22 +1742,20 @@ function toolCallRowTarget(contentLine: string, toolName: string): string {
  * then the target in `accent`. Neither of omp's glyph presets defines a
  * `tool.read`/`tool.grep`/`tool.ls` entry, which is how it marks them out. */
 function renderToolOneLine(target: string, title: string, width: number): string {
-  const head = ` ${glyphs().status.bullet} ${fgAnsi(HEX.lavender)}${title}${FG_RESET}`;
+  // The head is not fixed-size: a tool's declared label can be as long as the
+  // tool likes, so a budget that floors the target at one cell still emits a
+  // row wider than the terminal — and pi kills the TUI over exactly that. The
+  // whole row is fitted here, head included; nothing downstream truncates it.
+  const lead = ` ${glyphs().status.bullet} `;
+  const room = Math.max(0, width - visibleWidth(lead));
+  const shownTitle = clipPlain(title, room);
+  const head = `${lead}${fgAnsi(HEX.lavender)}${shownTitle}${FG_RESET}`;
   if (!target) return head;
-  // Nothing clamps this any more: the target used to be read off a row pi had
-  // already fitted to the terminal, and now it is spelled from `args`, where a
-  // path outside the session's directory can be longer than the terminal is
-  // wide. pi kills the TUI over a single overlong row, so the width is the
-  // one thing this must not get wrong. Elided from the middle, because the
-  // file name is the half worth keeping.
-  const headWidth = visibleWidth(stripAnsi(head)) + 1;
-  // Against the terminal as well as the width handed in. This is the one row
-  // whose length comes from content rather than from the frame's geometry, and
-  // pi kills the TUI over a single overlong one — so if a width ever arrives
-  // that the screen cannot hold, the screen wins.
-  const columns = process.stdout.columns || width;
-  const clipped = clipMiddle(target, Math.max(1, Math.min(width, columns) - headWidth));
-  return `${head} ${fgAnsi(HEX_TOOL.accent)}${clipped}${FG_RESET}`;
+  // One cell for the space that separates them.
+  const left = room - visibleWidth(shownTitle) - 1;
+  if (left <= 0) return head;
+  // Elided from the middle, because the file name is the half worth keeping.
+  return `${head} ${fgAnsi(HEX_TOOL.accent)}${clipMiddle(target, left)}${FG_RESET}`;
 }
 
 /** Where the call line ends, read off the rows rather than guessed from a
@@ -3415,11 +3463,15 @@ function patchToolCallFraming(): void {
       // exactly one row: there is no second row of it to leave behind, so
       // nothing can be torn. That is what gives pi's own spellings — a
       // `[skill] …` read among them — their file name back.
+      // A body of nothing but blank rows leaves `first` past the end, and
+      // reading that row threw — which the guard turned into a session with no
+      // framing at all rather than a crash, but neither is the intent.
+      const callRow = first < last ? rawCall[first] : "";
       const target = profilePath && (call.matched || runEnd === first + 1)
         ? `${displayToolPath(profilePath)}${profileSuffix}`
         : runEnd > first + 1
           ? ""
-          : toolCallRowTarget(rawCall[first], this.toolName);
+          : toolCallRowTarget(callRow, this.toolName);
       // omp marks a path target with a glyph in `muted`, one per filetype;
       // this carries the one file glyph rather than a devicon table.
       const targetGlyph = profilePath && target ? `${fgAnsi(HEX.overlay1)}${glyphs().node.scalar}${FG_RESET} ` : "";
@@ -3594,9 +3646,10 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     },
     handler: async (args, ctx) => {
       const words = args.trim().split(/\s+/).filter(Boolean);
+      const subcommand = words[0]?.toLowerCase();
 
-      if (words[0] === WORDS_SUBCOMMAND) {
-        const choice = words[1] ?? (spinnerWordsEnabled ? "off" : "on");
+      if (subcommand === WORDS_SUBCOMMAND) {
+        const choice = words[1]?.toLowerCase() ?? (spinnerWordsEnabled ? "off" : "on");
         if (choice !== "on" && choice !== "off") {
           ctx.ui.setStatus(GLYPH_STATUS_KEY, `omp-feel: say \`${WORDS_SUBCOMMAND} on\` or \`${WORDS_SUBCOMMAND} off\``);
           return;
@@ -3604,8 +3657,9 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
         spinnerWordsEnabled = choice === "on";
         spinnerQueue = [];
         // Felt at once, either way: turning it off mid-turn should quiet the
-        // line rather than leave the last joke sitting there.
-        refreshSpinnerWord();
+        // line rather than leave the last joke sitting there. Turning it on at
+        // an idle prompt spends nothing — the next turn draws its own.
+        if (agentWorking || !spinnerWordsEnabled) refreshSpinnerWord();
         if (currentCtx?.mode === "tui" && currentCtx.hasUI) configureWorkingIndicator(currentCtx);
         if (spinnerWordsEnabled) startSpinnerRotation();
         else stopSpinnerRotation();
@@ -3620,8 +3674,8 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
         return;
       }
 
-      if (words[0] === CYCLE_SUBCOMMAND) {
-        const choice = words[1];
+      if (subcommand === CYCLE_SUBCOMMAND) {
+        const choice = words[1]?.toLowerCase();
         if (!isSpinnerCycle(choice)) {
           ctx.ui.setStatus(GLYPH_STATUS_KEY, `omp-feel: cycle is ${CYCLE_VALUES.join(" or ")}`);
           return;
@@ -3638,7 +3692,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
         return;
       }
 
-      if (words[0] === GLYPH_SUBCOMMAND) words.shift();
+      if (subcommand === GLYPH_SUBCOMMAND) words.shift();
 
       // Nothing left to act on opens pi's own picker, so the setting is reachable
       // without having to remember the preset names.
@@ -3662,7 +3716,9 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   pi.events?.on?.(ACTIVITY_CHANNEL, (data: unknown) => {
     const raw = (data as { label?: unknown } | undefined)?.label;
     const next =
-      typeof raw === "string" && raw.trim().length > 0 ? sanitizeStatusText(raw) : undefined;
+      typeof raw === "string" && raw.trim().length > 0
+        ? clipPlain(sanitizeStatusText(raw), workingLabelMaxWidth())
+        : undefined;
     if (next === activityLabel) return;
     activityLabel = next;
     if (currentCtx && currentCtx.mode === "tui" && currentCtx.hasUI) {
@@ -3677,6 +3733,9 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     const flag = pi.getFlag(GLYPH_FLAG);
     if (isGlyphPreset(flag)) glyphPreset = flag;
     currentCtx = ctx;
+    // A session starting is not a turn, whatever the last one left running.
+    agentWorking = false;
+    stopSpinnerRotation();
     activeFooter = undefined;
     refreshSessionName(ctx);
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
@@ -3739,6 +3798,9 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeTui?.requestRender();
   });
   pi.on("agent_settled", () => {
+    // A run can settle without ending; either way there is nothing to watch.
+    agentWorking = false;
+    stopSpinnerRotation();
     activeTui?.requestRender();
   });
   pi.on("session_info_changed", () => {

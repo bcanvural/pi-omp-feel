@@ -50,26 +50,25 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Eagle soaring", "Panda rolling", "Kangaroo boxing", "Meerkat standing", "Sloth hanging", "Otter juggling",
     "Penguin-waddling", "Fox-trotting", "Cat-napping", "Prowling",
   ],
-  // Archaeology (10)
+  // Archaeology (9)
   archaeology: [
-    "Artifact-hunting", "Indiana-Jonesing", "Tomb-raiding", "Trowel-scraping", "Site-mapping", "Whip-snapping",
-    "Temple-unearthing", "Relic-deciphering", "Stratigraphy layering", "Sherd-sorting",
+    "Artifact-hunting", "Indiana-Jonesing", "Tomb-raiding", "Trowel-scraping", "Whip-snapping", "Temple-unearthing",
+    "Relic-deciphering", "Stratigraphy layering", "Sherd-sorting",
   ],
   // Arctic / Polar (11)
   arcticPolar: [
     "Iceberg calving", "Blizzarding", "Aurora dancing", "Husky-mushing", "Permafrost freezing", "Igloo-building",
     "Ice-fishing", "Polar-bear-prowling", "Glacier-trekking", "Snowshoeing", "Frost-nipping",
   ],
-  // Astronaut (12)
+  // Astronaut (11)
   astronaut: [
-    "Spacewalking", "Zero-G-floating", "Mission-controlling", "Mars rover driving", "Rocket-launching",
-    "Lifting off", "Calling Houston", "Moon-landing", "Apollo counting down", "Hubble gazing", "Astronaut orbiting",
-    "Reentering",
+    "Spacewalking", "Zero-G-floating", "Mars rover driving", "Rocket-launching", "Lifting off", "Calling Houston",
+    "Moon-landing", "Apollo counting down", "Hubble gazing", "Astronaut orbiting", "Reentering",
   ],
-  // Astronomy (10)
+  // Astronomy (9)
   astronomy: [
     "Supernova blazing", "Black hole warping", "Redshifting", "Pulsar-pulsing", "Quasar-blazing",
-    "Exoplanet-hunting", "Constellation-mapping", "Gravitational-lensing", "Meteor streaking", "Comet-trailing",
+    "Exoplanet-hunting", "Gravitational-lensing", "Meteor streaking", "Comet-trailing",
   ],
   // Aviation / Pilot (11)
   aviationPilot: [
@@ -86,20 +85,19 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Hive-minding", "Waggle-dancing", "Queen bee reigning", "Nectar-sipping", "Pollen-packing", "Honey-making",
     "Honeycomb-building", "Royal jelly feeding", "Propolis-patching", "Drone-drifting", "Stinger-flexing",
   ],
-  // Biology / Evolution (8)
+  // Biology / Evolution (5)
   biologyEvolution: [
-    "Mitosis doubling", "Natural-selecting", "DNA-sequencing", "Gene-editing", "Speciating", "CRISPR-editing",
-    "Meiosis halving", "Phenotype-shifting",
+    "Mitosis doubling", "Natural-selecting", "Speciating", "Meiosis halving", "Phenotype-shifting",
   ],
   // Board Games (11)
   boardGames: [
     "Checkmate calling", "Yahtzee rolling", "Uno-reversing", "Dice-rolling", "Meeple-moving", "Monopoly-banking",
     "Scrabble-tiling", "Risk-conquering", "Battleship-sinking", "Jenga-stacking", "Victory-pointing",
   ],
-  // Camping / Outdoors (11)
+  // Camping / Outdoors (10)
   campingOutdoors: [
     "Campfire crackling", "Marshmallow roasting", "Trail-blazing", "Tent-pitching", "S'mores-toasting",
-    "Bug-spraying", "Hammock-hanging", "Backpacking", "Compass-checking", "Map-folding", "Bear-proofing",
+    "Bug-spraying", "Hammock-hanging", "Backpacking", "Map-folding", "Bear-proofing",
   ],
   // Cat Behavior (30)
   catBehavior: [
@@ -110,10 +108,9 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Windowsill-surveilling", "Cardboard-shredding", "Tail-flicking", "Human-ignoring", "Vet-carrier-evading",
     "Belly-trap-setting", "Counter-surfing", "Laptop-commandeering", "5am-yowling",
   ],
-  // Chemistry (7)
+  // Chemistry (6)
   chemistry: [
     "Titrating", "Catalyzing", "Polymerizing", "Oxidizing", "Electroplating", "pH-adjusting",
-    "Spectroscopy-scanning",
   ],
   // Circus / Carnival (11)
   circusCarnival: [
@@ -130,10 +127,10 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Gotham patrolling", "Bat signaling", "Kryptonite dodging", "Speed-forcing", "Truth-lassoing", "Dark-knighting",
     "Justice League assembling", "Joker-laughing", "Boom-tubing", "Wonder Woman bracing", "Lantern-powering",
   ],
-  // Deep Sea / Submarine (11)
+  // Deep Sea / Submarine (10)
   deepSeaSubmarine: [
-    "Fathoming", "Submersing", "Sonar-pinging", "Periscope-peeking", "Trench-diving", "Silent-running",
-    "Bioluminescing", "Depth-charging", "Bathysphere descending", "Nautilus-diving", "Kraken-wrestling",
+    "Fathoming", "Submersing", "Periscope-peeking", "Trench-diving", "Silent-running", "Bioluminescing",
+    "Depth-charging", "Bathysphere descending", "Nautilus-diving", "Kraken-wrestling",
   ],
   // Detective / Noir (11)
   detectiveNoir: [
@@ -157,11 +154,6 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Sietch dwelling", "Crysknife-drawing", "Wormsign-spotting", "Melange-dreaming", "Spice trancing",
     "Shai-Hulud summoning", "Voice-commanding", "Ornithopter-flapping",
   ],
-  // Espionage / Spy (9)
-  espionageSpy: [
-    "Infiltrating", "Gadgeteering", "Dead-dropping", "Wiretapping", "Safecracking", "Double crossing",
-    "Disguise-donning", "Microfilm-swapping", "Bomb-defusing",
-  ],
   // Firefighter (11)
   firefighter: [
     "Hose-blasting", "Ladder-climbing", "Siren-wailing", "Axe-chopping", "Smoke-venting", "Hydrant-hooking",
@@ -172,14 +164,14 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Pickling", "Curing", "Brining", "Dehydrating", "Smoking", "Macerating", "Spherifying", "Sourdough starting",
     "Kombucha brewing", "Canning", "Distilling", "Kimchi fermenting", "Dry-aging", "Aging",
   ],
-  // Gaming (13)
+  // Gaming (11)
   gaming: [
     "Respawning", "Speedrunning", "Leveling-up", "Button-mashing", "Looting", "Nerfing", "Buffing",
-    "Glitch-hunting", "No-scoping", "Save-scumming", "Power-leveling", "Loot-farming", "Pixel-pushing",
+    "Glitch-hunting", "No-scoping", "Power-leveling", "Loot-farming",
   ],
-  // Gardening / Botanical (11)
+  // Gardening / Botanical (10)
   gardeningBotanical: [
-    "Composting", "Pruning", "Trellising", "Repotting", "Mulching", "Seed-starting", "Deadheading", "Grafting",
+    "Composting", "Trellising", "Repotting", "Mulching", "Seed-starting", "Deadheading", "Grafting",
     "Transplanting", "Weed-whacking", "Worm-casting",
   ],
   // Geology (11)
@@ -208,10 +200,10 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Stalking raptors", "Life finding a way", "T-Rex-roaring", "Cloning dinos", "Pondering chaos theory",
     "Outsmarting raptors", "Amber-extracting", "Sparing no expense", "Raptor-pack-hunting", "Island-escaping",
   ],
-  // Knitting / Textile (11)
+  // Knitting / Textile (10)
   knittingTextile: [
     "Crocheting", "Loom-weaving", "Yarn-bombing", "Purling", "Casting-on", "Cable-twisting", "Felting", "Quilting",
-    "Bobbin-winding", "Swatch-knitting", "Pattern-reading",
+    "Bobbin-winding", "Swatch-knitting",
   ],
   // Lord of the Rings (13)
   lordOfTheRings: [
@@ -224,9 +216,9 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Mushrooming", "Pipe-warping", "Star-powering", "Goomba-stomping", "Coin-collecting", "Fire flower shooting",
     "Princess-rescuing", "Kart-racing", "1-up collecting", "Yoshi-riding", "Koopa shell tossing",
   ],
-  // Marvel / MCU (13)
+  // Marvel / MCU (12)
   marvelMcu: [
-    "Hulk-smashing", "Wakanda forever chanting", "Assembling", "Web-slinging", "Thanos-snapping", "Thor-hammering",
+    "Hulk-smashing", "Wakanda forever chanting", "Web-slinging", "Thanos-snapping", "Thor-hammering",
     "Infinity Stone wielding", "Arc reactor powering", "Vibranium-forging", "Multiverse-hopping",
     "Bifrost-bridging", "Groot-rooting", "Shield-throwing",
   ],
@@ -240,11 +232,10 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Distracted glancing", "Sitting in fire", "Yeeting", "Dank-meming", "Galaxy-braining", "Pressing F",
     "Stonks rising", "Among Us sussing", "Ogre layering", "Drake-approving", "Spongebob-mocking",
   ],
-  // Minecraft (11)
+  // Minecraft (9)
   minecraft: [
-    "Creeper sneaking", "Redstone wiring", "Ender teleporting", "Block-placing", "Diamond-mining",
-    "Nether-portaling", "Elytra-gliding", "Villager-trading", "Bed-exploding", "Biome-exploring",
-    "Pickaxe-swinging",
+    "Creeper sneaking", "Ender teleporting", "Diamond-mining", "Nether-portaling", "Elytra-gliding",
+    "Villager-trading", "Bed-exploding", "Biome-exploring", "Pickaxe-swinging",
   ],
   // Monty Python (11)
   montyPython: [
@@ -272,20 +263,20 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Excavating", "Carbon-dating", "Fossil-hunting", "Bone-brushing", "Dino-reconstructing", "Strata-sifting",
     "Trackway-tracing", "Amber-entombing", "Coprolite-collecting", "Museum-curating", "Skull-mounting",
   ],
-  // Photography (11)
+  // Photography (9)
   photography: [
     "Aperture tweaking", "Long exposing", "Golden hour chasing", "Shutter-clicking", "Lens-focusing",
-    "Bokeh-blurring", "Focus-pulling", "White-balancing", "RAW-processing", "Color-grading", "ISO-adjusting",
+    "Bokeh-blurring", "White-balancing", "Color-grading", "ISO-adjusting",
   ],
-  // Pirate / Nautical (11)
+  // Pirate / Nautical (10)
   pirateNautical: [
-    "Swashbuckling", "Plundering", "Yo-ho-hoing", "Treasure-mapping", "Sea-shantying", "Cannon-firing",
-    "Jolly-rogering", "Plank-walking", "Parrot-perching", "Deck-swabbing", "Keelhauling",
+    "Swashbuckling", "Plundering", "Yo-ho-hoing", "Sea-shantying", "Cannon-firing", "Jolly-rogering",
+    "Plank-walking", "Parrot-perching", "Deck-swabbing", "Keelhauling",
   ],
-  // Pokemon (11)
+  // Pokemon (10)
   pokemon: [
     "Pikachu shocking", "Evolving", "Pokeball-throwing", "Catchin' em all", "Gym-battling", "Shiny-hunting",
-    "Team Rocket blasting", "Pokedex scanning", "Thunderbolting", "Master Ball throwing", "Type-matching",
+    "Team Rocket blasting", "Thunderbolting", "Master Ball throwing", "Type-matching",
   ],
   // Prohibition Era (11)
   prohibitionEra: [
@@ -297,10 +288,10 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Entangling", "Superposition juggling", "Schrödinger-catting", "Qubit-flipping", "Decohering",
     "Wavefunction evolving", "Uncertainty hedging", "Vacuum-fluctuating", "Spin-flipping",
   ],
-  // Retro Gaming (11)
+  // Retro Gaming (9)
   retroGaming: [
-    "Pac-Man chomping", "Tetris stacking", "Konami code entering", "Cartridge-blowing", "Coin-inserting",
-    "Joystick-waggling", "8-bit-bopping", "Sprite-rendering", "Warp-zoning", "Boss-rushing", "High-score-chasing",
+    "Pac-Man chomping", "Tetris stacking", "Konami code entering", "Coin-inserting", "Joystick-waggling",
+    "8-bit-bopping", "Warp-zoning", "Boss-rushing", "High-score-chasing",
   ],
   // Samurai / Japanese (11)
   samuraiJapanese: [
@@ -314,20 +305,19 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Nanoswarming", "Warp-driving", "Lightsabering", "Phasing", "Time-warping", "Hypershifting", "Nebula-hopping",
     "Photon-blasting", "Tractor-beaming",
   ],
-  // Social Media (10)
+  // Social Media (8)
   socialMedia: [
-    "Doom-swiping", "Going viral", "Hashtagging", "DM-sliding", "Clout-chasing", "Clickbaiting", "Thread-spinning",
-    "Feed-refreshing", "Like-farming", "Influencing",
+    "Doom-swiping", "Going viral", "Hashtagging", "DM-sliding", "Clout-chasing", "Clickbaiting", "Like-farming",
+    "Influencing",
   ],
-  // Space / NASA (45)
+  // Space / NASA (42)
   spaceNasa: [
-    "Aerobraking", "Attitude-tuning", "Berthing", "Chilling down", "Circularizing", "Coasting", "Comet-chasing",
-    "Crater-hopping", "Deorbiting", "Depressurizing", "Docking", "Downlinking", "Egressing", "Gimbaling",
-    "Grappling", "Gravity-assisting", "Igniting", "Ingressing", "Jettisoning", "Midcourse-correcting",
-    "Nulling rates", "Parachuting", "Plane-changing", "Pressurizing", "Reboosting", "Refueling", "Rendezvousing",
-    "Retroburning", "Retrorocketing", "Rocketing", "Roving", "Slingshotting", "Splashing down", "Star-tracking",
-    "Starhopping", "Station-keeping", "Sunskimming", "Thrusting", "Touching down", "Ullaging", "Undocking",
-    "Uplinking", "Vectoring", "Venting", "Yawing",
+    "Aerobraking", "Berthing", "Chilling down", "Circularizing", "Coasting", "Comet-chasing", "Crater-hopping",
+    "Deorbiting", "Depressurizing", "Docking", "Downlinking", "Egressing", "Gimbaling", "Grappling",
+    "Gravity-assisting", "Igniting", "Ingressing", "Jettisoning", "Midcourse-correcting", "Parachuting",
+    "Plane-changing", "Pressurizing", "Reboosting", "Refueling", "Rendezvousing", "Retroburning", "Retrorocketing",
+    "Rocketing", "Roving", "Slingshotting", "Splashing down", "Starhopping", "Station-keeping", "Sunskimming",
+    "Thrusting", "Touching down", "Ullaging", "Undocking", "Uplinking", "Vectoring", "Venting", "Yawing",
   ],
   // Sports (16)
   sports: [
@@ -335,16 +325,15 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Freeclimbing", "Polevaulting", "Kayaking", "Juggling", "Slacklining", "Rock-climbing", "Shadowboxing",
     "Yoga posing", "Trampolining",
   ],
-  // Star Trek (13)
+  // Star Trek (11)
   starTrek: [
-    "Engaging", "Beaming-up", "Boldly-going", "Mind-melding", "Holodeck simulating", "Tricorder scanning",
-    "Redshirting", "Assimilating", "Tribble breeding", "Vulcan nerve pinching", "Red-alerting",
-    "Cheating Kobayashi", "Prime Directive following",
+    "Engaging", "Beaming-up", "Boldly-going", "Mind-melding", "Redshirting", "Assimilating", "Tribble breeding",
+    "Vulcan nerve pinching", "Red-alerting", "Cheating Kobayashi", "Prime Directive following",
   ],
-  // Star Wars (12)
+  // Star Wars (11)
   starWars: [
-    "Force-pushing", "Jedi-mind-tricking", "Podracing", "Wookiee-roaring", "Kessel-running", "Cantina-jamming",
-    "Bounty-hunting", "Sarlacc-dodging", "Ewok-dancing", "Saber-dueling", "Trench-running", "Yoda-flipping",
+    "Jedi-mind-tricking", "Podracing", "Wookiee-roaring", "Kessel-running", "Cantina-jamming", "Bounty-hunting",
+    "Sarlacc-dodging", "Ewok-dancing", "Saber-dueling", "Trench-running", "Yoda-flipping",
   ],
   // Stranger Things (11)
   strangerThings: [
@@ -352,10 +341,9 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Scooping cones", "Mall raiding", "Hellfire Club rolling", "Christmas-lighting", "Gate portaling",
     "D&D campaigning",
   ],
-  // Streaming / Creator (11)
+  // Streaming / Creator (5)
   streamingCreator: [
-    "Rage-quitting", "Calling GG", "Chat-moderating", "Sub-gifting", "Emote-spamming", "Overlay-tweaking",
-    "Clip-editing", "Mic-checking", "Hype-train-riding", "Raid-hosting", "Stream-starting",
+    "Rage-quitting", "Calling GG", "Sub-gifting", "Hype-train-riding", "Raid-hosting",
   ],
   // Studio Ghibli (10)
   studioGhibli: [
@@ -368,10 +356,10 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Spectrum-singing", "Color-splashing", "Saturation-boosting", "Rainbow-blending", "Luminance-mapping",
     "Aura-sensing",
   ],
-  // The Matrix (11)
+  // The Matrix (9)
   theMatrix: [
-    "Red-pilling", "Bullet-timing", "Glitching", "Spoon-bending", "Agent-smithing", "Neo-dodging",
-    "Kung-fu-loading", "Code-raining", "Denying spoons", "Jacking-in", "Reality-bending",
+    "Red-pilling", "Bullet-timing", "Glitching", "Spoon-bending", "Agent-smithing", "Neo-dodging", "Denying spoons",
+    "Jacking-in", "Reality-bending",
   ],
   // The Office (12)
   theOffice: [
@@ -379,10 +367,10 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Beet-farming", "Jim-pranking", "Shuffling paper", "Botching math", "Midnight screening", "Dundie-awarding",
     "Snatching pretzels",
   ],
-  // Trading / Crypto (11)
+  // Trading / Crypto (10)
   tradingCrypto: [
-    "Hodling", "Longing", "Shorting", "Staking", "Mining", "Minting", "Degening", "Apeing", "Mooning",
-    "Yieldfarming", "Arbitraging",
+    "Hodling", "Longing", "Shorting", "Staking", "Minting", "Degening", "Apeing", "Mooning", "Yieldfarming",
+    "Arbitraging",
   ],
   // Victorian / Steampunk (11)
   victorianSteampunk: [
