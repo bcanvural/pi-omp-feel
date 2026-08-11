@@ -810,7 +810,7 @@ function decorateSpinnerWord(word: string): string {
   return /[.!?…:]$/.test(clipped) ? clipped : `${clipped}…`;
 }
 
-/** Choose the word for the turn that is starting. */
+/** Choose the next word. */
 function refreshSpinnerWord(): void {
   if (!spinnerWordsEnabled) {
     spinnerWord = undefined;
@@ -818,6 +818,41 @@ function refreshSpinnerWord(): void {
   }
   const word = nextSpinnerWord();
   spinnerWord = word === undefined ? undefined : decorateSpinnerWord(word);
+}
+
+/** How long a word stays up while the agent works. */
+const SPINNER_WORD_INTERVAL_MS = 5000;
+let spinnerRotation: ReturnType<typeof setInterval> | undefined;
+/** Whether there is work to watch. Nothing rotates against an idle prompt. */
+let agentWorking = false;
+
+function stopSpinnerRotation(): void {
+  if (spinnerRotation === undefined) return;
+  clearInterval(spinnerRotation);
+  spinnerRotation = undefined;
+}
+
+/** Change the word every few seconds for as long as there is work to watch.
+ *
+ * Handing pi a new indicator restarts its loader — the spinner glyph returns
+ * to the first braille frame and the band re-enters from the left — which is
+ * why this is not faster: at a few seconds the reset reads as a new label
+ * arriving, and the word beside it has changed to say so. */
+function startSpinnerRotation(): void {
+  stopSpinnerRotation();
+  if (!spinnerWordsEnabled || !agentWorking) return;
+  if (currentCtx?.mode !== "tui" || !currentCtx.hasUI) return;
+  spinnerRotation = setInterval(() => {
+    if (!spinnerWordsEnabled || !agentWorking || currentCtx?.mode !== "tui" || !currentCtx.hasUI) {
+      stopSpinnerRotation();
+      return;
+    }
+    refreshSpinnerWord();
+    configureWorkingIndicator(currentCtx);
+    activeTui?.requestRender();
+  }, SPINNER_WORD_INTERVAL_MS);
+  // A pending word must never be the reason a process stays up.
+  spinnerRotation.unref?.();
 }
 
 /** Cells the band travels across: the label, the joining space, and the hint —
@@ -3562,10 +3597,14 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
           return;
         }
         spinnerWordsEnabled = choice === "on";
-        // The turn already under way keeps whatever it started with; the
-        // change is for the next one.
-        if (!spinnerWordsEnabled) spinnerWord = undefined;
         spinnerQueue = [];
+        // Felt at once, either way: turning it off mid-turn should quiet the
+        // line rather than leave the last joke sitting there.
+        refreshSpinnerWord();
+        if (currentCtx?.mode === "tui" && currentCtx.hasUI) configureWorkingIndicator(currentCtx);
+        if (spinnerWordsEnabled) startSpinnerRotation();
+        else stopSpinnerRotation();
+        activeTui?.requestRender();
         saveSettings();
         ctx.ui.setStatus(
           GLYPH_STATUS_KEY,
@@ -3681,12 +3720,17 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeTui?.requestRender();
   });
   pi.on("agent_start", () => {
-    // One word per turn, picked before the frames are built around it.
+    // A word to start on, then a new one every few seconds until the work ends.
+    agentWorking = true;
     refreshSpinnerWord();
     if (currentCtx?.mode === "tui" && currentCtx.hasUI) configureWorkingIndicator(currentCtx);
+    startSpinnerRotation();
     activeTui?.requestRender();
   });
   pi.on("agent_end", () => {
+    // Nothing to watch between turns.
+    agentWorking = false;
+    stopSpinnerRotation();
     activeTui?.requestRender();
   });
   pi.on("agent_settled", () => {
@@ -3700,6 +3744,8 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    agentWorking = false;
+    stopSpinnerRotation();
     activeFooter?.dispose();
     activeTui = undefined;
     activeFooter = undefined;

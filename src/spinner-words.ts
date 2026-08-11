@@ -1,15 +1,14 @@
 /**
  * Words the working line can say instead of "Working…", by theme.
  *
- * Generated from the community list at
- * https://github.com/wynandw87/claude-code-spinner-verbs, which collects
- * spinner verbs for Claude Code. Anything that could be mistaken for a report
- * of real work is left out: whole themes about software, security and
- * paperwork, and, inside the themes that remain, every entry naming something
- * a coding agent actually does — a build, a commit, a deploy, a test — because
- * a joke label that reads as a status line is worse than no label at all.
+ * A hardcoded list — nothing is fetched or generated at build time. The one
+ * rule every entry follows: it must not name something a coding agent could
+ * actually be doing. Whole themes about software, security and paperwork are
+ * absent for that reason, and inside the themes that remain, words like
+ * `Archiving`, `Staging` or `Optimizing` are gone too — a joke label that
+ * reads as a status line is worse than no label at all.
  *
- * Off by default. `/omp-feel words on` turns it on; see the README.
+ * Off by default; `/omp-feel words on`.
  */
 export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
   // 1960s Hippie (11)
