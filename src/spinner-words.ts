@@ -187,34 +187,11 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Tectonic shifting", "Eroding", "Fossilizing", "Subducting", "Stratifying", "Sedimenting", "Faulting",
     "Quaking", "Geyser-spewing", "Core-drilling", "Magma-intruding",
   ],
-  // Godzilla (28)
-  godzilla: [
-    "Atomic-breathing", "Kaiju-wrangling", "MechaGodzilla-piloting", "Monster Island-vacationing", "Mothra-praying",
-    "City-stomping", "MUTO-nesting", "Titan-awakening", "Oxygen-destroying", "Dorsal-fin-glowing",
-    "Ghidorah-headbutting", "Skull Island-exploring", "Monarch-monitoring", "Rodan-swooping", "Kong-climbing",
-    "Gigan-slashing", "Shobijin-summoning", "Evangelion-syncing", "Kaiju-scoring", "Radiation-absorbing",
-    "Godzilla-roaring", "Mothra-chanting", "Biollante-blooming", "Hedorah-polluting", "Anguirus-rolling",
-    "Jet Jaguar-signaling", "SpaceGodzilla-crystalizing", "Destroyah-fragmenting",
-  ],
   // Harry Potter (13)
   harryPotter: [
     "Expelliarmus casting", "Expecto Patronum summoning", "Potion-brewing", "Quidditch playing", "Wand-waving",
     "Horcrux-hunting", "Floo powder traveling", "Snitch-catching", "Accio summoning", "Alohomora unlocking",
     "Marauding", "Howler-sending", "Boggart-banishing",
-  ],
-  // Heist Movie (64)
-  heistMovie: [
-    "Crew-assembling", "Talent-scouting", "Favor-calling", "Score-planning", "Joint-casing", "Blueprint-unrolling",
-    "Floorplan-memorizing", "Plan-rehearsing", "Alibi-rehearsing", "Cover-building", "Mark-charming",
-    "Gala-gliding", "Crowd-blending", "Accent-faking", "Tuxedo-tailoring", "Badge-borrowing", "Access-forging",
-    "Guard-bribing", "Guard-distracting", "Insider-briefing", "Timing-syncing", "Camera-looping", "Signal-jamming",
-    "Alarm-silencing", "Sensor-evading", "Laser-dodging", "Duct-crawling", "Roof-rappelling", "Skylight-descending",
-    "Tunnel-boring", "Glass-cutting", "Wire-cutting", "Cable-splicing", "Hinge-melting", "Keypad-bypassing",
-    "Lock-picking", "Pin-tumbling", "Tumbler-listening", "Dial-spinning", "Combination-guessing", "Vault-locating",
-    "Vault-drilling", "Diamond-palming", "Bag-switching", "Decoy-deploying", "Pocket-picking", "Loot-bagging",
-    "Lookout-posting", "Signal-waiting", "Exit-improvising", "Escape-mapping", "Van-idling", "Getaway-driving",
-    "Traffic-weaving", "Tail-shaking", "Heat-avoiding", "Loot-fencing", "Take-splitting", "Betrayal-anticipating",
-    "Twist-unveiling", "Grudge-burying", "Sunset-riding", "Retirement-delaying", "Last-jobbing",
   ],
   // James Bond (10)
   jamesBond: [

@@ -1701,7 +1701,12 @@ function renderToolOneLine(target: string, title: string, width: number): string
   // one thing this must not get wrong. Elided from the middle, because the
   // file name is the half worth keeping.
   const headWidth = visibleWidth(stripAnsi(head)) + 1;
-  const clipped = clipMiddle(target, Math.max(1, width - headWidth));
+  // Against the terminal as well as the width handed in. This is the one row
+  // whose length comes from content rather than from the frame's geometry, and
+  // pi kills the TUI over a single overlong one — so if a width ever arrives
+  // that the screen cannot hold, the screen wins.
+  const columns = process.stdout.columns || width;
+  const clipped = clipMiddle(target, Math.max(1, Math.min(width, columns) - headWidth));
   return `${head} ${fgAnsi(HEX_TOOL.accent)}${clipped}${FG_RESET}`;
 }
 
