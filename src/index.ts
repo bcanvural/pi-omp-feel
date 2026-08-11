@@ -1529,20 +1529,27 @@ function asToolArgs(args: unknown): ToolArgs {
  * merely counts the notice as content again, which is cosmetic. */
 const READ_NOTICE_TAIL = /\n\n\[(?:Showing lines \d|\d+ more lines in file)[^\n]*\]$/;
 
+/** How wide a phrase the working line will carry before it is elided. The
+ * Loader wraps rather than overflows, so an overlong label costs a row and
+ * shoves the editor down every time a tool starts — measured against the
+ * terminal, less the spinner, the hint, and a margin off the edge. */
+function activityMaxWidth(): number {
+  const columns = process.stdout.columns || 80;
+  const chrome = 2 + 1 + visibleWidth(OMP_WORKING_HINT) + 4;
+  return Math.max(12, Math.min(60, columns - chrome));
+}
+
 /** `Reading index.ts` — the file named the way the header names it. */
 function fileActivity(verb: string, args: ToolArgs): string | undefined {
   const path = pathFromArgs(args);
-  return path ? `${verb} ${displayToolPath(path)}` : verb;
+  return path ? `${verb} ${clipMiddle(displayToolPath(path), activityMaxWidth() - verb.length - 1)}` : verb;
 }
 
 /** `Searching for TODO` — clipped, because the label is one row of a frame. */
 function patternActivity(verb: string, pattern: unknown): string {
   if (typeof pattern !== "string" || pattern.trim() === "") return verb;
-  return `${verb} ${clipPlain(sanitizeStatusText(pattern), ACTIVITY_PATTERN_MAX_WIDTH)}`;
+  return `${verb} ${clipPlain(sanitizeStatusText(pattern), activityMaxWidth() - verb.length - 1)}`;
 }
-
-/** How much of a pattern the working line will carry. */
-const ACTIVITY_PATTERN_MAX_WIDTH = 32;
 
 /** `Running git` — the program a command starts with, past the things people
  * put in front of one. */
@@ -1586,9 +1593,18 @@ function toolCallRowTarget(contentLine: string, toolName: string): string {
  * single row instead of a block: an uncoloured bullet, the label in `toolTitle`,
  * then the target in `accent`. Neither of omp's glyph presets defines a
  * `tool.read`/`tool.grep`/`tool.ls` entry, which is how it marks them out. */
-function renderToolOneLine(target: string, title: string): string {
+function renderToolOneLine(target: string, title: string, width: number): string {
   const head = ` ${glyphs().status.bullet} ${fgAnsi(HEX.lavender)}${title}${FG_RESET}`;
-  return target ? `${head} ${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}` : head;
+  if (!target) return head;
+  // Nothing clamps this any more: the target used to be read off a row pi had
+  // already fitted to the terminal, and now it is spelled from `args`, where a
+  // path outside the session's directory can be longer than the terminal is
+  // wide. pi kills the TUI over a single overlong row, so the width is the
+  // one thing this must not get wrong. Elided from the middle, because the
+  // file name is the half worth keeping.
+  const headWidth = visibleWidth(stripAnsi(head)) + 1;
+  const clipped = clipMiddle(target, Math.max(1, width - headWidth));
+  return `${head} ${fgAnsi(HEX_TOOL.accent)}${clipped}${FG_RESET}`;
 }
 
 /** Where the call line ends, read off the rows rather than guessed from a
@@ -3327,7 +3343,11 @@ function patchToolCallFraming(): void {
         // header the rebuild just cleaned up.
         if (target && !defaultBody && bodyStart < last) {
           // omp leaves the colon on the default foreground, not the label's.
-          framedHeader = `${iconPrefix}${fgAnsi(HEX_TOOL.accent)}${title}${FG_RESET}: ${targetGlyph}${fgAnsi(HEX_TOOL.accent)}${target}${FG_RESET}`;
+          // The bar clips its label from the end, so a long path would lose the
+          // file name; give it a target that already fits, elided in the middle.
+          const headerRoom = width - 10 - visibleWidth(stripAnsi(`${iconPrefix}${title}`)) - (targetGlyph ? 2 : 0);
+          const headerTarget = clipMiddle(target, Math.max(1, headerRoom));
+          framedHeader = `${iconPrefix}${fgAnsi(HEX_TOOL.accent)}${title}${FG_RESET}: ${targetGlyph}${fgAnsi(HEX_TOOL.accent)}${headerTarget}${FG_RESET}`;
         } else {
           bodyStart = first;
         }
@@ -3369,7 +3389,7 @@ function patchToolCallFraming(): void {
           }
         }
       } else {
-        lines.push(renderToolOneLine(target, title));
+        lines.push(renderToolOneLine(target, title, width));
         const preview = renderResultPreview(profile, this, width);
         if (preview) lines.push(...preview);
       }
