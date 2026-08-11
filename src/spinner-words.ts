@@ -182,16 +182,6 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Composting", "Pruning", "Trellising", "Repotting", "Mulching", "Seed-starting", "Deadheading", "Grafting",
     "Transplanting", "Weed-whacking", "Worm-casting",
   ],
-  // Gen-Z (46)
-  genZ: [
-    "Rizzing", "Gyatt-checking", "Mogging", "Looksmaxxing", "Code-maxxing", "Sigma-grinding", "Based-ing",
-    "Glazing", "Mewing", "Brainrotting", "Aura-farming", "Vibe-checking", "Cap-checking", "No-capping",
-    "Skibidi-ing", "Ratio-ing", "Spitting facts", "Gaslighting", "Gatekeeping", "Girlbossing", "Yapping",
-    "Locking in", "Crashing out", "Fanum-taxing", "Popping off", "Slaying", "Bussin", "Cooking", "Tryharding",
-    "Geeking", "Doomscrolling", "Simping", "Cringe-dodging", "Pilling", "ATE-ing", "Skill-issuing", "Fr-fr'ing",
-    "Glow-upping", "Maxxing", "Grass-touching", "Uncooking", "Deluluing", "Ohio-ing", "Main-charactering",
-    "NPC-ing", "Sus-ing",
-  ],
   // Geology (11)
   geology: [
     "Tectonic shifting", "Eroding", "Fossilizing", "Subducting", "Stratifying", "Sedimenting", "Faulting",
@@ -205,16 +195,6 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Gigan-slashing", "Shobijin-summoning", "Evangelion-syncing", "Kaiju-scoring", "Radiation-absorbing",
     "Godzilla-roaring", "Mothra-chanting", "Biollante-blooming", "Hedorah-polluting", "Anguirus-rolling",
     "Jet Jaguar-signaling", "SpaceGodzilla-crystalizing", "Destroyah-fragmenting",
-  ],
-  // Gym Bro (49)
-  gymBro: [
-    "Bulking", "Cutting", "Shredding", "Repping-out", "Gains-chasing", "Pump-chasing", "Deadlifting", "Benching",
-    "Squatting", "Curling", "Maxing-out", "Supersetting", "Drop-setting", "Rest-pausing", "Deloading",
-    "Overloading", "Micro-loading", "Plate-loading", "Rack-pulling", "Racking-up", "Macro-tracking", "Carb-loading",
-    "Protein-loading", "Protein-shaking", "Pre-workouting", "Dry-scooping", "Foam-rolling", "Meal-prepping",
-    "Peaking", "Recomping", "Leaning-out", "Locking-in", "Dialing-in", "Beast-moding", "Swole-maxing", "Flexing",
-    "Mirin'", "Grindsetting", "Hypertrophying", "Pumping-iron", "Pushing-failure", "Chalk-dusting", "Mind-muscling",
-    "Vein-popping", "Core-crushing", "Ego-lifting", "Lunking-around", "Rowing-hard", "PR-hunting",
   ],
   // Harry Potter (13)
   harryPotter: [
@@ -236,19 +216,6 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
     "Traffic-weaving", "Tail-shaking", "Heat-avoiding", "Loot-fencing", "Take-splitting", "Betrayal-anticipating",
     "Twist-unveiling", "Grudge-burying", "Sunset-riding", "Retirement-delaying", "Last-jobbing",
   ],
-  // Hustle Culture (58)
-  hustleCulture: [
-    "5am-clubbing", "Audience-growing", "Bag-chasing", "Bag-securing", "Biohacking", "Cold-calling",
-    "Cold-emailing", "Cold-plunging", "Compounding", "Content-creating", "Cross-selling", "Day-trading",
-    "Deal-closing", "Deal-flowing", "Diversifying", "Dominating", "Dopamine-hacking", "Dropshipping",
-    "Empire-building", "Equity-raising", "Exit-planning", "Failing-forward", "Founder-moding", "Funnel-building",
-    "Gamifying", "Habit-stacking", "Intermittent-fasting", "KPI-chasing", "Lead-generating", "Masterminding",
-    "Maximizing", "Monetizing", "Monk-moding", "Outhustling", "Outsourcing", "Outworking", "Overachieving",
-    "Overdelivering", "Paper-stacking", "Pitching", "Podcasting", "Prospecting", "Rebranding", "Repurposing",
-    "Rise-and-grinding", "Sidehustling", "Sigma-moding", "Sleep-skipping", "Sleepmaxxing", "Sprinting",
-    "Strategizing", "Timeboxing", "Unicorn-chasing", "Upselling", "Vision-boarding", "Wealth-stacking",
-    "Wholesaling", "Winning",
-  ],
   // James Bond (10)
   jamesBond: [
     "Shaken-not-stirring", "Q branch tinkering", "Aston Martin driving", "Introducing 007", "Goldfingering",
@@ -268,15 +235,6 @@ export const SPINNER_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
   knittingTextile: [
     "Crocheting", "Loom-weaving", "Yarn-bombing", "Purling", "Casting-on", "Cable-twisting", "Felting", "Quilting",
     "Bobbin-winding", "Swatch-knitting", "Pattern-reading",
-  ],
-  // LinkedIn-Speak (33)
-  linkedinSpeak: [
-    "Synergizing", "Circling-back", "Leveraging", "Operationalizing", "Future-proofing", "Doubling-down",
-    "Moving-the-needle", "Deep-diving", "Touching-base", "Value-adding", "Growth-hacking", "Hustling", "Grinding",
-    "Disrupting", "Amplifying", "Elevating", "Bandwidth-checking", "Boiling-the-ocean", "10x-ing",
-    "Paradigm-shifting", "Taking-it-offline", "Maximizing-ROI", "Synergy-seeking", "Right-sizing",
-    "Low-hanging-fruiting", "Delivering-impact", "Driving-outcomes", "Thought-leading", "Upskilling", "Reskilling",
-    "Empowering", "Networking", "Socializing",
   ],
   // Lord of the Rings (13)
   lordOfTheRings: [
