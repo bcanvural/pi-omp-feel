@@ -250,7 +250,10 @@ function loadSettings(): void {
     const path = join(getAgentDir(), SETTINGS_FILE_NAME);
     if (!existsSync(path)) return;
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      storedSettings = {};
+      return;
+    }
     storedSettings = parsed as Record<string, unknown>;
     const stored = storedSettings as {
       glyphs?: unknown;
@@ -915,12 +918,12 @@ const SHIMMER_FRAME_BUDGET = 200;
  * list going. Minimising outright put the default label on seventeen, which
  * is a 1.6-second sweep where omp's ten gives 1.13: a fifth of a second is
  * nothing to store and everything to look at, on the one label every session
- * shows. Within the budget the gap never drifts more than a cell. */
+ * shows. Within the budget the gap holds omp's ten for every word in the list
+ * and for `Working…`; a label of some other length can pull it two. */
 function shimmerPadding(cells: number): number {
   const cached = shimmerPaddingCache.get(cells);
   if (cached !== undefined) return cached;
   let best: number | undefined;
-  let bestFrames = Number.POSITIVE_INFINITY;
   let smallest = SHIMMER_PADDING_PREFERRED;
   let smallestFrames = Number.POSITIVE_INFINITY;
   for (let padding = SHIMMER_PADDING_MIN; padding <= SHIMMER_PADDING_MAX; padding++) {
@@ -933,14 +936,10 @@ function shimmerPadding(cells: number): number {
     const closer =
       best === undefined ||
       Math.abs(padding - SHIMMER_PADDING_PREFERRED) < Math.abs(best - SHIMMER_PADDING_PREFERRED);
-    if (closer) {
-      best = padding;
-      bestFrames = frames;
-    }
+    if (closer) best = padding;
   }
   // Nothing within budget: take the shortest list there is.
   const chosen = best ?? smallest;
-  void bestFrames;
   shimmerPaddingCache.set(cells, chosen);
   return chosen;
 }
@@ -2772,6 +2771,9 @@ function escapeControlChars(text: string): string {
  * these rows sit inside — and defaults to the 3-cell `...` where omp's
  * default is `…`. */
 function clipPlain(text: string, maxWidth: number): string {
+  // No room is no room. Returning an ellipsis anyway is the same mistake as
+  // flooring a width budget at one cell — see `clipMiddle`, which guards it.
+  if (maxWidth <= 0) return "";
   if (visibleWidth(text) <= maxWidth) return text;
   let out = "";
   let used = 0;
