@@ -223,15 +223,24 @@ const SETTINGS_FILE_NAME = "pi-omp-feel.json";
  * the settings file beside the glyph preset to turn it on. */
 let readPreviewEnabled = false;
 
+/** Whether the working line names what each tool call is doing. See
+ * `derivedLabel`; `"derivedLabels": false` in the settings file turns it off. */
+let derivedLabelsEnabled = true;
+
 /** Remember the chosen preset across sessions. pi has no per-extension settings
  * store, so keep a small file of our own beside the degrade report. */
 function loadGlyphPreset(): void {
   try {
     const path = join(getAgentDir(), SETTINGS_FILE_NAME);
     if (!existsSync(path)) return;
-    const stored = JSON.parse(readFileSync(path, "utf8")) as { glyphs?: unknown; readPreview?: unknown };
+    const stored = JSON.parse(readFileSync(path, "utf8")) as {
+      glyphs?: unknown;
+      readPreview?: unknown;
+      derivedLabels?: unknown;
+    };
     if (isGlyphPreset(stored.glyphs)) glyphPreset = stored.glyphs;
     if (typeof stored.readPreview === "boolean") readPreviewEnabled = stored.readPreview;
+    if (typeof stored.derivedLabels === "boolean") derivedLabelsEnabled = stored.derivedLabels;
   } catch {
     // An unreadable or malformed settings file must not stop the extension
     // loading; the default preset applies instead.
@@ -243,7 +252,7 @@ function saveGlyphPreset(): void {
     mkdirSync(getAgentDir(), { recursive: true });
     writeFileSync(
       join(getAgentDir(), SETTINGS_FILE_NAME),
-      `${JSON.stringify({ glyphs: glyphPreset, readPreview: readPreviewEnabled }, null, 2)}\n`,
+      `${JSON.stringify({ glyphs: glyphPreset, readPreview: readPreviewEnabled, derivedLabels: derivedLabelsEnabled }, null, 2)}\n`,
     );
   } catch {
     // Persisting is best effort — the choice still holds for this session.
@@ -676,13 +685,31 @@ const OMP_WORKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 const OMP_WORKING_TEXT = "Working…";
 const OMP_WORKING_HINT = "⟨esc⟩";
 
-// The band sweeps the label *and* the Esc hint as one strip, then rests. Measured
-// off omp's own frames: the two cells either side of the peak carry the accent, a
-// further two fade through overlay1, and the sweep is followed by a stretch where
-// nothing is lit. Over the hint the peak is lavender rather than the accent.
-const SHIMMER_PEAK_RADIUS = 2;
-const SHIMMER_FADE_RADIUS = 4;
-const SHIMMER_REST_FRAMES = 8;
+// The band sweeps the label *and* the Esc hint as one strip. omp drives it by
+// time rather than by frame — `SHIMMER_SPEED_CELLS_PER_S` in its `shimmer.ts`,
+// redrawn at 30fps, with the spinner glyph on its own 80 ms clock — so its band
+// crosses a cell in 33 ms where a frame-per-cell list at pi's 80 ms cadence
+// took 80. That was the whole of the difference in feel: the colours and the
+// band's shape already matched (verified against omp's own animation frames —
+// dim outside, overlay1 approaching, accent at the crest, lavender over the
+// hint).
+//
+// pi's Loader cycles a fixed list at a fixed interval, so the time-driven
+// sweep is baked instead: the list runs at `WORKING_FRAME_MS`, the band
+// advances by a fraction of a cell per frame to hold omp's speed, and the
+// spinner advances every other frame to hold its own.
+const SHIMMER_SPEED_CELLS_PER_S = 30;
+const WORKING_FRAME_MS = 40;
+const SHIMMER_CELLS_PER_FRAME = (SHIMMER_SPEED_CELLS_PER_S * WORKING_FRAME_MS) / 1000;
+const SPINNER_ADVANCE_MS = 80;
+const SPINNER_FRAMES_PER_GLYPH = SPINNER_ADVANCE_MS / WORKING_FRAME_MS;
+/** omp's `CLASSIC_PADDING`: cells of dark either side of the strip, which is
+ * the pause between sweeps. */
+const SHIMMER_PADDING = 10;
+/** omp's `CLASSIC_BAND_HALF_WIDTH` and its two intensity thresholds. */
+const SHIMMER_BAND_HALF_WIDTH = 6;
+const SHIMMER_TIER_HIGH = 0.65;
+const SHIMMER_TIER_MID = 0.22;
 
 /** omp does not always say "Working…" — it names what it is waiting on, and the
  * shimmer sweeps whatever that says. pi keeps its label in a slot the frames
@@ -693,8 +720,28 @@ const SHIMMER_REST_FRAMES = 8;
 export const ACTIVITY_CHANNEL = "ui:activity";
 let activityLabel: string | undefined;
 
+/** What the tool now running is doing, in this extension's own words. omp gets
+ * this from the model — it adds a field to every tool's schema and asks for the
+ * intent of each call — which costs tokens on every call and depends on the
+ * model playing along. The same sentence can be read off arguments pi already
+ * hands us, so that is where this comes from. Turn it off with
+ * `"derivedLabels": false` in the settings file to get a plain "Working…". */
+let derivedLabel: string | undefined;
+
 function workingLabel(): string {
-  return activityLabel ?? OMP_WORKING_TEXT;
+  // A label another extension hands over is about something this one cannot
+  // see, so it outranks a phrase built from a tool call.
+  return activityLabel ?? derivedLabel ?? OMP_WORKING_TEXT;
+}
+
+/** Set the derived label and rebuild the indicator, unless nothing changed —
+ * every tool call would otherwise rebuild several hundred frames. */
+function setDerivedLabel(next: string | undefined): void {
+  if (!derivedLabelsEnabled || next === derivedLabel) return;
+  derivedLabel = next;
+  if (activityLabel !== undefined) return;
+  if (currentCtx?.mode === "tui" && currentCtx.hasUI) configureWorkingIndicator(currentCtx);
+  activeTui?.requestRender();
 }
 
 /** Cells the band travels across: the label, the joining space, and the hint. */
@@ -702,23 +749,33 @@ function shimmerCells(label: string): number {
   return [...label].length + 1 + [...OMP_WORKING_HINT].length;
 }
 
-/** One full cycle: the band enters, crosses every cell, leaves, then rests. */
+/** One full cycle in cells: the strip plus omp's dark padding either side. */
 function shimmerPeriod(label: string): number {
-  return shimmerCells(label) + 2 * SHIMMER_FADE_RADIUS + SHIMMER_REST_FRAMES;
+  return shimmerCells(label) + 2 * SHIMMER_PADDING;
+}
+
+function greatestCommonDivisor(a: number, b: number): number {
+  return b === 0 ? a : greatestCommonDivisor(b, a % b);
 }
 
 function leastCommonMultiple(a: number, b: number): number {
-  const greatestCommonDivisor = (x: number, y: number): number => (y === 0 ? x : greatestCommonDivisor(y, x % y));
   return (a * b) / greatestCommonDivisor(a, b);
 }
 
 // Pi cycles the supplied frames verbatim, so the list has to span a whole number
 // of both the spinner and the shimmer cycle. A shorter list wraps one of them
 // mid-cycle: at 16 frames the 10-glyph spinner jumped five positions on every
-// wrap, roughly once a second. The label's length feeds the shimmer cycle, so
-// this is recomputed whenever the label changes.
+// wrap, roughly once a second.
+//
+// The band no longer moves a whole cell per frame, so its cycle is counted in
+// fifths of a cell (`SHIMMER_CELLS_PER_FRAME` is 6/5 at these constants): the
+// list closes on the first frame where a whole number of periods has passed.
 function workingFrameCount(label: string): number {
-  return leastCommonMultiple(OMP_WORKING_FRAMES.length, shimmerPeriod(label));
+  const stepNumerator = Math.round(SHIMMER_CELLS_PER_FRAME * 5);
+  const periodFifths = shimmerPeriod(label) * 5;
+  const bandFrames = periodFifths / greatestCommonDivisor(stepNumerator, periodFifths);
+  const spinnerFrames = OMP_WORKING_FRAMES.length * SPINNER_FRAMES_PER_GLYPH;
+  return leastCommonMultiple(spinnerFrames, bandFrames);
 }
 
 function workingAccent(ctx: ExtensionContext): string {
@@ -726,24 +783,30 @@ function workingAccent(ctx: ExtensionContext): string {
   return sessionName ? sessionAccentHex(sessionName) : HEX.peach;
 }
 
+/** omp's `classicIntensity`: a cosine bump, zero outside the band's half-width. */
+function shimmerIntensity(distance: number): number {
+  if (distance >= SHIMMER_BAND_HALF_WIDTH) return 0;
+  return 0.5 * (1 + Math.cos((Math.PI * distance) / SHIMMER_BAND_HALF_WIDTH));
+}
+
 function workingMessage(label: string, accent: string, frame: number): string {
   const labelCells = [...label];
   const cells = [...labelCells, " ", ...OMP_WORKING_HINT];
-  const center = (frame % shimmerPeriod(label)) - SHIMMER_FADE_RADIUS;
+  // The band's own position, un-floored as omp leaves it, so a fractional step
+  // reads as smooth movement rather than a stutter every few frames.
+  const position = (frame * SHIMMER_CELLS_PER_FRAME) % shimmerPeriod(label);
 
   return cells
     .map((character, index) => {
-      const distance = Math.abs(index - center);
+      const distance = Math.abs(index + SHIMMER_PADDING - position);
+      const intensity = shimmerIntensity(distance);
       // The hint peaks lavender; the label peaks in the session accent.
       const peak = index > labelCells.length ? HEX.lavender : accent;
       const color =
-        distance <= SHIMMER_PEAK_RADIUS
-          ? peak
-          : distance <= SHIMMER_FADE_RADIUS
-            ? HEX.overlay1
-            : HEX.overlay0;
-      const bold = distance === 0 ? "\x1b[1m" : "";
-      const boldReset = distance === 0 ? "\x1b[22m" : "";
+        intensity >= SHIMMER_TIER_HIGH ? peak : intensity >= SHIMMER_TIER_MID ? HEX.overlay1 : HEX.overlay0;
+      // omp bolds the whole crest, not just its centre cell.
+      const bold = intensity >= SHIMMER_TIER_HIGH ? "\x1b[1m" : "";
+      const boldReset = intensity >= SHIMMER_TIER_HIGH ? "\x1b[22m" : "";
       return `${bold}${fgAnsi(color)}${character}${FG_RESET}${boldReset}`;
     })
     .join("");
@@ -762,7 +825,7 @@ function workingFrames(label: string, accent: string): string[] {
   // the Loader's own 80 ms animation advances the shimmer reliably rather than
   // relying on a second timer that can be replaced by core status events.
   const frames = Array.from({ length: workingFrameCount(label) }, (_, index) => {
-    const spinner = OMP_WORKING_FRAMES[index % OMP_WORKING_FRAMES.length];
+    const spinner = OMP_WORKING_FRAMES[Math.floor(index / SPINNER_FRAMES_PER_GLYPH) % OMP_WORKING_FRAMES.length];
     return `${fgAnsi(accent)}${spinner}${FG_RESET} ${workingMessage(label, accent, index)}`;
   });
   cachedWorkingFrames = { label, accent, frames };
@@ -772,7 +835,7 @@ function workingFrames(label: string, accent: string): string[] {
 function configureWorkingIndicator(ctx: ExtensionContext): void {
   ctx.ui.setWorkingIndicator({
     frames: workingFrames(workingLabel(), workingAccent(ctx)),
-    intervalMs: 80,
+    intervalMs: WORKING_FRAME_MS,
   });
   // omp uses a Unicode ellipsis and an explicit Esc hint instead of pi's
   // default ASCII message. ANSI is nested deliberately so pi's muted wrapper
@@ -1286,6 +1349,10 @@ interface ToolProfile {
   /** What pi writes after that path on the call row — a line range — kept
    * beside the target when the header is rebuilt from `args`. */
   targetSuffix?(args: ToolArgs): string | undefined;
+  /** What this call is doing, in the words the working line should shimmer
+   * while it runs. omp asks the model for this on every call; a phrase built
+   * from `args` says the same thing without spending tokens on it. */
+  activity?(args: ToolArgs): string | undefined;
   /** Where the content this tool writes lives in `args`. A tool that says so
    * has its body rebuilt as omp's write preview — dim line-number gutter, a
    * live tail while streaming, the first lines once settled — instead of
@@ -1323,6 +1390,7 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
       command: args => (typeof args.command === "string" ? args.command : undefined),
       wall: bashWall,
       output: toolResultText,
+      activity: args => runningActivity(args.command),
     },
   ],
   // pi-runbg. `exec_command` is a shell command that happens to survive the
@@ -1335,6 +1403,7 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
       headerless: true,
       sections: true,
       command: args => (typeof args.cmd === "string" ? args.cmd : undefined),
+      activity: args => runningActivity(args.cmd),
       detail: args => [
         // The session cwd is already in the status bar and omp does not repeat
         // it on a bash block, so name a directory only when this call overrode it.
@@ -1347,22 +1416,32 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
   ],
   // Keystrokes into a live session are not a command, so this one keeps a
   // header — but its output is still output, and belongs under a divider.
-  ["write_stdin", { sections: true, wall: runbgWall }],
+  ["write_stdin", { sections: true, wall: runbgWall, activity: () => "Typing" }],
   [
     "write",
     {
       summary: writeLineSummary,
       contentPath: pathFromArgs,
+      activity: args => fileActivity("Writing", args),
       content: args => (typeof args.content === "string" ? args.content : undefined),
     },
   ],
-  ["edit", { frameSelfRendered: true, summary: editDiffSummary, contentPath: pathFromArgs }],
+  [
+    "edit",
+    {
+      frameSelfRendered: true,
+      summary: editDiffSummary,
+      contentPath: pathFromArgs,
+      activity: args => fileActivity("Editing", args),
+    },
+  ],
   // pi renders a collapsed read as its call row alone; omp's read entries hang
   // a three-line cell of the file under the summary row.
   [
     "read",
     {
       contentPath: pathFromArgs,
+      activity: args => fileActivity("Reading", args),
       // pi's `formatReadLineRange`: `:12`, or `:12-40` when a limit is set.
       targetSuffix: args => {
         const offset = typeof args.offset === "number" && Number.isFinite(args.offset) ? Math.floor(args.offset) : undefined;
@@ -1380,7 +1459,12 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
   ],
   // pi-ask. One question puts itself in the header via the usual target hoist;
   // several need saying, since only the first would otherwise be visible.
-  ["ask", { iconless: true, summary: askQuestionSummary }],
+  ["ask", { iconless: true, summary: askQuestionSummary, activity: () => "Asking" }],
+  // These three draw as one row and need nothing else from a profile; they are
+  // here to say what they are doing while they do it.
+  ["grep", { activity: args => patternActivity("Searching for", args.pattern) }],
+  ["find", { activity: args => patternActivity("Finding", args.pattern) }],
+  ["ls", { activity: args => (typeof args.path === "string" ? `Listing ${displayToolPath(args.path)}` : "Listing") }],
 ]);
 
 function askQuestionSummary(args: ToolArgs): string | undefined {
@@ -1444,6 +1528,33 @@ function asToolArgs(args: unknown): ToolArgs {
  * counted nor previewed. Wording-matched to those two shapes; a mismatch
  * merely counts the notice as content again, which is cosmetic. */
 const READ_NOTICE_TAIL = /\n\n\[(?:Showing lines \d|\d+ more lines in file)[^\n]*\]$/;
+
+/** `Reading index.ts` — the file named the way the header names it. */
+function fileActivity(verb: string, args: ToolArgs): string | undefined {
+  const path = pathFromArgs(args);
+  return path ? `${verb} ${displayToolPath(path)}` : verb;
+}
+
+/** `Searching for TODO` — clipped, because the label is one row of a frame. */
+function patternActivity(verb: string, pattern: unknown): string {
+  if (typeof pattern !== "string" || pattern.trim() === "") return verb;
+  return `${verb} ${clipPlain(sanitizeStatusText(pattern), ACTIVITY_PATTERN_MAX_WIDTH)}`;
+}
+
+/** How much of a pattern the working line will carry. */
+const ACTIVITY_PATTERN_MAX_WIDTH = 32;
+
+/** `Running git` — the program a command starts with, past the things people
+ * put in front of one. */
+function runningActivity(command: unknown): string | undefined {
+  if (typeof command !== "string") return undefined;
+  for (const word of command.trim().split(/\s+/)) {
+    if (word === "" || word.includes("=") || word === "sudo" || word === "command" || word === "time") continue;
+    const name = word.split("/").pop() ?? word;
+    return `Running ${name}`;
+  }
+  return "Running";
+}
 
 /** pi's file tools accept both spellings (`file_path ?? path`, see its
  * read/write/edit renderers); the same tool never sends both. */
@@ -3408,7 +3519,17 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeFooter?.invalidate();
     activeTui?.requestRender();
   });
+  // omp names the call while it is still streaming, before the tool runs; the
+  // earliest pi says anything about one is when it starts executing.
+  pi.on("tool_execution_start", (event: { toolName?: string; args?: unknown }) => {
+    const profile = TOOL_PROFILES.get(String(event?.toolName ?? ""));
+    const phrase = profile?.activity?.(asToolArgs(event?.args));
+    setDerivedLabel(phrase ?? (event?.toolName ? toolTitle(String(event.toolName)) : undefined));
+  });
   pi.on("tool_execution_end", () => {
+    // The tool is done; the model is thinking again until the next call says
+    // otherwise, which is what omp's label does between intents.
+    setDerivedLabel(undefined);
     activeFooter?.invalidate();
     activeTui?.requestRender();
   });
@@ -3432,6 +3553,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeTui?.requestRender();
   });
   pi.on("agent_end", () => {
+    setDerivedLabel(undefined);
     activeTui?.requestRender();
   });
   pi.on("agent_settled", () => {
