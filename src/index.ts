@@ -223,24 +223,15 @@ const SETTINGS_FILE_NAME = "pi-omp-feel.json";
  * the settings file beside the glyph preset to turn it on. */
 let readPreviewEnabled = false;
 
-/** Whether the working line names what each tool call is doing. See
- * `derivedLabel`; `"derivedLabels": false` in the settings file turns it off. */
-let derivedLabelsEnabled = true;
-
 /** Remember the chosen preset across sessions. pi has no per-extension settings
  * store, so keep a small file of our own beside the degrade report. */
 function loadGlyphPreset(): void {
   try {
     const path = join(getAgentDir(), SETTINGS_FILE_NAME);
     if (!existsSync(path)) return;
-    const stored = JSON.parse(readFileSync(path, "utf8")) as {
-      glyphs?: unknown;
-      readPreview?: unknown;
-      derivedLabels?: unknown;
-    };
+    const stored = JSON.parse(readFileSync(path, "utf8")) as { glyphs?: unknown; readPreview?: unknown };
     if (isGlyphPreset(stored.glyphs)) glyphPreset = stored.glyphs;
     if (typeof stored.readPreview === "boolean") readPreviewEnabled = stored.readPreview;
-    if (typeof stored.derivedLabels === "boolean") derivedLabelsEnabled = stored.derivedLabels;
   } catch {
     // An unreadable or malformed settings file must not stop the extension
     // loading; the default preset applies instead.
@@ -252,7 +243,7 @@ function saveGlyphPreset(): void {
     mkdirSync(getAgentDir(), { recursive: true });
     writeFileSync(
       join(getAgentDir(), SETTINGS_FILE_NAME),
-      `${JSON.stringify({ glyphs: glyphPreset, readPreview: readPreviewEnabled, derivedLabels: derivedLabelsEnabled }, null, 2)}\n`,
+      `${JSON.stringify({ glyphs: glyphPreset, readPreview: readPreviewEnabled }, null, 2)}\n`,
     );
   } catch {
     // Persisting is best effort — the choice still holds for this session.
@@ -720,28 +711,8 @@ const SHIMMER_TIER_MID = 0.22;
 export const ACTIVITY_CHANNEL = "ui:activity";
 let activityLabel: string | undefined;
 
-/** What the tool now running is doing, in this extension's own words. omp gets
- * this from the model — it adds a field to every tool's schema and asks for the
- * intent of each call — which costs tokens on every call and depends on the
- * model playing along. The same sentence can be read off arguments pi already
- * hands us, so that is where this comes from. Turn it off with
- * `"derivedLabels": false` in the settings file to get a plain "Working…". */
-let derivedLabel: string | undefined;
-
 function workingLabel(): string {
-  // A label another extension hands over is about something this one cannot
-  // see, so it outranks a phrase built from a tool call.
-  return activityLabel ?? derivedLabel ?? OMP_WORKING_TEXT;
-}
-
-/** Set the derived label and rebuild the indicator, unless nothing changed —
- * every tool call would otherwise rebuild several hundred frames. */
-function setDerivedLabel(next: string | undefined): void {
-  if (!derivedLabelsEnabled || next === derivedLabel) return;
-  derivedLabel = next;
-  if (activityLabel !== undefined) return;
-  if (currentCtx?.mode === "tui" && currentCtx.hasUI) configureWorkingIndicator(currentCtx);
-  activeTui?.requestRender();
+  return activityLabel ?? OMP_WORKING_TEXT;
 }
 
 /** Cells the band travels across: the label, the joining space, and the hint. */
@@ -1349,10 +1320,6 @@ interface ToolProfile {
   /** What pi writes after that path on the call row — a line range — kept
    * beside the target when the header is rebuilt from `args`. */
   targetSuffix?(args: ToolArgs): string | undefined;
-  /** What this call is doing, in the words the working line should shimmer
-   * while it runs. omp asks the model for this on every call; a phrase built
-   * from `args` says the same thing without spending tokens on it. */
-  activity?(args: ToolArgs): string | undefined;
   /** Where the content this tool writes lives in `args`. A tool that says so
    * has its body rebuilt as omp's write preview — dim line-number gutter, a
    * live tail while streaming, the first lines once settled — instead of
@@ -1390,7 +1357,6 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
       command: args => (typeof args.command === "string" ? args.command : undefined),
       wall: bashWall,
       output: toolResultText,
-      activity: args => runningActivity(args.command),
     },
   ],
   // pi-runbg. `exec_command` is a shell command that happens to survive the
@@ -1403,7 +1369,6 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
       headerless: true,
       sections: true,
       command: args => (typeof args.cmd === "string" ? args.cmd : undefined),
-      activity: args => runningActivity(args.cmd),
       detail: args => [
         // The session cwd is already in the status bar and omp does not repeat
         // it on a bash block, so name a directory only when this call overrode it.
@@ -1416,13 +1381,12 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
   ],
   // Keystrokes into a live session are not a command, so this one keeps a
   // header — but its output is still output, and belongs under a divider.
-  ["write_stdin", { sections: true, wall: runbgWall, activity: () => "Typing" }],
+  ["write_stdin", { sections: true, wall: runbgWall }],
   [
     "write",
     {
       summary: writeLineSummary,
       contentPath: pathFromArgs,
-      activity: args => fileActivity("Writing", args),
       content: args => (typeof args.content === "string" ? args.content : undefined),
     },
   ],
@@ -1432,7 +1396,6 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
       frameSelfRendered: true,
       summary: editDiffSummary,
       contentPath: pathFromArgs,
-      activity: args => fileActivity("Editing", args),
     },
   ],
   // pi renders a collapsed read as its call row alone; omp's read entries hang
@@ -1441,7 +1404,6 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
     "read",
     {
       contentPath: pathFromArgs,
-      activity: args => fileActivity("Reading", args),
       // pi's `formatReadLineRange`: `:12`, or `:12-40` when a limit is set.
       targetSuffix: args => {
         const offset = typeof args.offset === "number" && Number.isFinite(args.offset) ? Math.floor(args.offset) : undefined;
@@ -1459,12 +1421,7 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
   ],
   // pi-ask. One question puts itself in the header via the usual target hoist;
   // several need saying, since only the first would otherwise be visible.
-  ["ask", { iconless: true, summary: askQuestionSummary, activity: () => "Asking" }],
-  // These three draw as one row and need nothing else from a profile; they are
-  // here to say what they are doing while they do it.
-  ["grep", { activity: args => patternActivity("Searching for", args.pattern) }],
-  ["find", { activity: args => patternActivity("Finding", args.pattern) }],
-  ["ls", { activity: args => (typeof args.path === "string" ? `Listing ${displayToolPath(args.path)}` : "Listing") }],
+  ["ask", { iconless: true, summary: askQuestionSummary }],
 ]);
 
 function askQuestionSummary(args: ToolArgs): string | undefined {
@@ -1528,40 +1485,6 @@ function asToolArgs(args: unknown): ToolArgs {
  * counted nor previewed. Wording-matched to those two shapes; a mismatch
  * merely counts the notice as content again, which is cosmetic. */
 const READ_NOTICE_TAIL = /\n\n\[(?:Showing lines \d|\d+ more lines in file)[^\n]*\]$/;
-
-/** How wide a phrase the working line will carry before it is elided. The
- * Loader wraps rather than overflows, so an overlong label costs a row and
- * shoves the editor down every time a tool starts — measured against the
- * terminal, less the spinner, the hint, and a margin off the edge. */
-function activityMaxWidth(): number {
-  const columns = process.stdout.columns || 80;
-  const chrome = 2 + 1 + visibleWidth(OMP_WORKING_HINT) + 4;
-  return Math.max(12, Math.min(60, columns - chrome));
-}
-
-/** `Reading index.ts` — the file named the way the header names it. */
-function fileActivity(verb: string, args: ToolArgs): string | undefined {
-  const path = pathFromArgs(args);
-  return path ? `${verb} ${clipMiddle(displayToolPath(path), activityMaxWidth() - verb.length - 1)}` : verb;
-}
-
-/** `Searching for TODO` — clipped, because the label is one row of a frame. */
-function patternActivity(verb: string, pattern: unknown): string {
-  if (typeof pattern !== "string" || pattern.trim() === "") return verb;
-  return `${verb} ${clipPlain(sanitizeStatusText(pattern), activityMaxWidth() - verb.length - 1)}`;
-}
-
-/** `Running git` — the program a command starts with, past the things people
- * put in front of one. */
-function runningActivity(command: unknown): string | undefined {
-  if (typeof command !== "string") return undefined;
-  for (const word of command.trim().split(/\s+/)) {
-    if (word === "" || word.includes("=") || word === "sudo" || word === "command" || word === "time") continue;
-    const name = word.split("/").pop() ?? word;
-    return `Running ${name}`;
-  }
-  return "Running";
-}
 
 /** pi's file tools accept both spellings (`file_path ?? path`, see its
  * read/write/edit renderers); the same tool never sends both. */
@@ -3539,17 +3462,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeFooter?.invalidate();
     activeTui?.requestRender();
   });
-  // omp names the call while it is still streaming, before the tool runs; the
-  // earliest pi says anything about one is when it starts executing.
-  pi.on("tool_execution_start", (event: { toolName?: string; args?: unknown }) => {
-    const profile = TOOL_PROFILES.get(String(event?.toolName ?? ""));
-    const phrase = profile?.activity?.(asToolArgs(event?.args));
-    setDerivedLabel(phrase ?? (event?.toolName ? toolTitle(String(event.toolName)) : undefined));
-  });
   pi.on("tool_execution_end", () => {
-    // The tool is done; the model is thinking again until the next call says
-    // otherwise, which is what omp's label does between intents.
-    setDerivedLabel(undefined);
     activeFooter?.invalidate();
     activeTui?.requestRender();
   });
@@ -3573,7 +3486,6 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     activeTui?.requestRender();
   });
   pi.on("agent_end", () => {
-    setDerivedLabel(undefined);
     activeTui?.requestRender();
   });
   pi.on("agent_settled", () => {
