@@ -39,13 +39,21 @@ Do **not** confuse it with two unrelated things that answer to the same names:
 
 ## Where this reaches past pi's public API
 
-Two things omp does natively have no supported equivalent in pi, so they are done structurally:
+Three things omp does natively have no supported equivalent in pi, so they are done structurally:
 
 **Tool-call framing.** pi's core `ToolExecutionComponent` frames built-in tools itself (a tinted Box, no borders) and exposes no hook to restyle it; `registerTool({ renderCall, renderResult, renderShell })` only applies to tools the extension itself registers. The pi extension loader aliases `@earendil-works/pi-coding-agent` to the very same module instance core imports, so this extension patches the shared `ToolExecutionComponent.prototype.render` to wrap the default path in an omp-style frame, reading private fields (`contentBox`, `callRendererComponent`, …) as it goes. Tools whose definitions supply their own renderer (`renderShell === "self"`) are left untouched unless their profile opts in with `frameSelfRendered`, which only `edit` does: what pi calls a shell there is a background-tinted `Box` holding a diff, the same shape every other block is built from, so it can be framed without touching the diff itself.
 
 **Prompt framing.** omp's TUI has a first-class top-border provider (`packages/tui`, `editor-top-border-provider`); pi's does not. So `OmpEditor` post-processes the rows the stock editor returns, identifying its flat `─` border rows and reshaping them.
 
-Both assumptions can break on a `pi` upgrade, and both run on every rendered frame — so each is wrapped to **fail once and degrade**: the first failure latches and hands rendering back to pi for the rest of the session. A pi internals change costs you the omp styling, not a usable TUI.
+**Widget animation.** An extension can mount a component above or below the editor, and one reporting work that is still running will put a spinner on it. That spinner need not be moving: a glyph picked by hashing the work's own counters holds still while nothing is reported and then jumps several frames when a burst of it lands, which reads as a stall rather than as progress. Repainting more often cannot fix a glyph that is a function of counters instead of time, so `InteractiveMode.prototype.setExtensionWidget` is patched to sit in front of the component's `render`: rows that open with a spinner glyph get that glyph re-picked from the clock and omp's band swept across the label beside it, on the same 30 cells a second the working line uses. Everything past the label keeps the colours its own extension chose.
+
+Which widgets get this is an allowlist of the keys pi mounts them under, not a guess from their contents. No rule written about characters can do the job: those spinner glyphs are ordinary braille dot patterns, so `⠇ queue · 3 pending` and `⠙ ⣀⣤⣶⣿ · mem` are a status row and a chart with nothing to tell them apart — and a rule loose enough to catch the first rewrites the second on every frame. A widget this does not recognise is returned untouched and never asks for a frame.
+
+Within a recognised widget, a row still has to look live: a spinner glyph, a space, a label, and the tool's own ` · ` before the statistics. The glyph may sit behind indentation or a tree prefix, because several agents at once put every per-agent row behind a `├─` and those are the rows most worth animating. The band moves a grapheme cluster at a time rather than a code point, since opening a colour inside a flag or a ZWJ sequence makes the terminal draw its parts while `visibleWidth` measures the result as unchanged — a width check cannot catch that, so the only defence is not to split them. Any replacement that would not preserve the row's exact width is declined outright, and a row carrying a hyperlink is left alone rather than rebuilt without it.
+
+The clock is driven by when a live row was last drawn, not by the outcome of whichever render happened last. pi draws every mounted widget within one frame, so a widget with nothing running would otherwise stop the clock the live widget beside it had just started; and widgets can leave without their owner saying so, since `clearExtensionWidgets` empties pi's maps directly. A stamp going stale ends the animation in both cases, and in whatever third case exists.
+
+All three assumptions can break on a `pi` upgrade, and all three run on every rendered frame — so each is wrapped to **fail once and degrade**: the first failure latches and hands rendering back to pi for the rest of the session. A pi internals change costs you the omp styling, not a usable TUI.
 
 When that happens it writes `~/.pi/agent/pi-omp-feel-degraded.md` (appended, capped at 256 KB) and points at it from the footer. The entry carries the stack with `src/index.ts:<line>`, the installed pi version, which of the fields the patch depends on were actually present, and the list of assumptions that subsystem makes — enough to reconstruct the failure. Hand it straight to an agent:
 
@@ -75,12 +83,15 @@ Some tools deserve better than that default, and `TOOL_PROFILES` in `src/index.t
 | `summary` | close the header the way omp does — `· 4 lines` on a write, `⟨+1/-1⟩` on an edit |
 | `frameSelfRendered` | frame this tool even though it declares `renderShell: "self"` |
 | `contentPath` | where the file this tool touches lives in `args`, so its rows (and a diff's context lines) highlight in that language |
+| `target` | what the call names when that is not a file — the agent a delegating tool is about to run — hoisted into the header the same way, but carrying no file glyph and saying nothing about a language |
 | `content` | where written content lives in `args`, so the body rebuilds as omp's write cell — dim gutter, tail-12 streaming, head-6 settled |
 | `resultText` | readable output in the tool result, so a one-line tool grows omp's three-line collapsed cell (`read` sets it) |
 | `startLine` | first line number of that output, for the cell's gutter (`read`'s `offset`) |
 | `output` | command output in the tool result, so a collapsed sections block re-tails it at omp's ten lines. A tool that draws its own collapsed output window must not set this |
 
 Backgrounded-shell tools ship profiled: a command that outlives its call gets exactly what omp gives bash, and a keystroke stream into a live session keeps its header, because keystrokes are not a command. What omp has no vocabulary for — a session id, a log path — stays beside the badge rather than being folded into it. A tool that draws its own collapsed output window keeps it; the window's depth is that tool's setting, not this extension's.
+
+Tools that delegate to another agent ship profiled too, for a subtler reason. Where a call row ends is normally read off a blank row, but pi leaves none between a tool's call and its result — built-in renderers happen to open with one of their own, and a renderer that opens straight onto content does not. Such a block used to be read as one long unbroken call: nothing hoisted, and the body opening by repeating the very row the header should have carried. Telling the profile what the call row says fixes it, so the header names the agent and the body starts at its status. A launch spelled from something `args` cannot reconstruct is deliberately left alone — an unhoisted call costs one repeated word, where a wrong guess would cut the block in the wrong place.
 
 The extensions being described do not know this file exists and do not need to. Everything comes from `args`, which is structured, or from matching rows they already draw — and a match that fails leaves their own output showing rather than breaking the block. A profile is also ignored for a tool whose renderers are absent, which is what a transcript replayed after uninstalling that extension looks like.
 

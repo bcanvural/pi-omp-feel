@@ -1,4 +1,4 @@
-import { CustomEditor, getAgentDir, getLanguageFromPath, highlightCode, ToolExecutionComponent, VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, getAgentDir, getLanguageFromPath, highlightCode, InteractiveMode, ToolExecutionComponent, VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -320,6 +320,22 @@ const ANSI_SEQ =
 
 function stripAnsi(text: string): string {
   return text.replace(ANSI_SEQ, "");
+}
+
+/** Text split the way a terminal groups it, rather than by code point. A flag,
+ * a skin tone and a ZWJ family are each several code points that draw as one
+ * cell group, and opening a colour between two of them makes the terminal draw
+ * the parts instead: two regional indicators where there was one flag, twice
+ * the cells. `visibleWidth` segments the same way, which is why measuring the
+ * result cannot detect the damage — the only defence is not to split them. */
+const graphemeSegmenter =
+  typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : undefined;
+
+function graphemeCells(text: string): string[] {
+  if (!graphemeSegmenter) return [...text];
+  return [...graphemeSegmenter.segment(text)].map(part => part.segment);
 }
 
 const FLAT_BORDER = /^─+$/;
@@ -896,7 +912,7 @@ function startSpinnerRotation(): void {
  * run long (a 31-cell strip needs 340 frames where 32 needs 40). The extra
  * cell is never drawn; it only lets the band travel over an even period. */
 function shimmerCells(label: string): number {
-  const strip = [...label].length + 1 + [...OMP_WORKING_HINT].length;
+  const strip = graphemeCells(label).length + 1 + graphemeCells(OMP_WORKING_HINT).length;
   return strip % 2 === 0 ? strip : strip + 1;
 }
 
@@ -982,8 +998,12 @@ function shimmerIntensity(distance: number): number {
 }
 
 function workingMessage(label: string, accent: string, frame: number): string {
-  const labelCells = [...label];
-  const cells = [...labelCells, " ", ...OMP_WORKING_HINT];
+  // Split the way a terminal groups cells, not by code point: colouring the
+  // halves of one cluster separately makes the terminal draw them separately.
+  // Our own labels are plain words today, so this changes nothing about the
+  // frames — it keeps the path honest if one ever is not.
+  const labelCells = graphemeCells(label);
+  const cells = [...labelCells, " ", ...graphemeCells(OMP_WORKING_HINT)];
   // The band's own position, un-floored as omp leaves it, so a fractional step
   // reads as smooth movement rather than a stutter every few frames.
   // Sized on the even count the period uses, though only the real cells are
@@ -1057,11 +1077,12 @@ function configureWorkingIndicator(ctx: ExtensionContext): void {
 let toolFramingDisabled = false;
 let editorReshapeDisabled = false;
 
-type DegradedSubsystem = "tool-framing" | "prompt-framing";
+type DegradedSubsystem = "tool-framing" | "prompt-framing" | "widget-animation";
 
 const DEGRADED_LABEL: Record<DegradedSubsystem, string> = {
   "tool-framing": "tool-call framing",
   "prompt-framing": "prompt framing",
+  "widget-animation": "widget animation",
 };
 
 // What each subsystem assumes about pi's internals. A failure means one of these
@@ -1077,8 +1098,16 @@ const DEGRADED_ASSUMPTIONS: Record<DegradedSubsystem, string[]> = {
     "pi's collapsed bash output is a visual-line tail whose window row (`... (N earlier lines, … to expand)`) renders first, with every output row — wrapped continuations included — opening with the same `toolOutput` foreground, and the warning/timing rows that follow opening with their own (see `rebuildBashResultRenderComponent`; `fullOutputPath` in `result.details` names the footer to strip).",
     "`edit` declares `renderShell: \"self\"` and builds its own shell as a background-tinted `Box`, so `selfRenderContainer` yields rows this can frame (see `frameSelfRendered`). Its diff rows are `+123 `/`-123 `/` 123 `-prefixed, which is what the `⟨+N/-M⟩` badge counts.",
     "`contentBox` is a pi-tui `Box` with paddingX 1, so it renders children at `width - 2`. The section path (see `TOOL_PROFILES`) therefore skips it entirely (rendering those same children only at `width - 4`) and takes the background tint from `contentBox.bgFn(\"\")` instead — rendering both would thrash the children's single-width caches.",
+    "A `Box` emits its `paddingY` blank rows above and below its children as a group, never between them. A tool whose result renderer opens straight onto content therefore leaves no blank row marking where its call row ended, so the call is found by matching the text a profile's `contentPath`/`target` predicts rather than by looking for the gap — and a tool with no profile keeps its call row in the body instead of being cut in the wrong place.",
     "Rows from a background-tinted `Box` start with an SGR background sequence and end with `ESC[49m` (see `addSideBorders`).",
     "`theme.bg()` returns `<bg-ansi><text>ESC[49m`, so an empty probe yields the same background prefix as a rendered row.",
+  ],
+  "widget-animation": [
+    "`InteractiveMode.prototype.setExtensionWidget` can be patched, on the same module-instance aliasing the tool-frame patch relies on. A widget passed as a string array is left to pi; only the component-factory form is wrapped.",
+    "That factory is called `(tui, theme)` with pi's own `TUI` as the first argument, so `requestRender()` is reachable through it. The component it returns is rendered by pi on every frame, and its `render` can be replaced in place — the object itself is handed back untouched, since the owning extension may have put anything else on it.",
+    "Only widgets whose key is in `ANIMATED_WIDGET_KEYS` are touched at all — the shape of a live row cannot be told from a braille chart by any rule about its characters, so recognition is by key. Within one of those, a live row is indentation or tree drawing, then one of `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, then a space, then its label, then ` · ` before the statistics. A row shaped any other way is returned exactly as it arrived.",
+    "Widget rows arrive padded to the width they were rendered at, so a decoration must preserve a row's visible width exactly; any replacement that would not is declined rather than emitted. `visibleWidth` cannot see a grapheme cluster split between two colours — it segments the same way — so the band moves a cluster at a time instead of relying on that check.",
+    "pi renders every mounted widget within a single frame, and `clearExtensionWidgets` empties its widget maps without going through `setExtensionWidget`. The animation clock is therefore driven by when a live row was last drawn rather than by the last render's outcome, so neither a quiet widget beside a live one nor an unannounced unmount can leave it stuck on or off.",
   ],
   "prompt-framing": [
     "The stock pi `Editor` draws its top and bottom border as rows containing only `─` (see `isFlatBorderLine`).",
@@ -1541,6 +1570,17 @@ interface ToolProfile {
    * file can be highlighted in its language the way omp does, and so the
    * header can name it even when pi wrapped its call row. */
   contentPath?(args: ToolArgs): string | undefined;
+  /** What this call names, when the thing it names is not a file — the agent a
+   * delegating tool is about to run, say. Hoisted into the header exactly as a
+   * path is, but it carries no file glyph and says nothing about a language.
+   *
+   * Spelling it out matters most for a tool whose renderer writes its content
+   * straight under its call row: pi's `Box` puts no blank row between a call
+   * component and a result one, so without a target to match, the walk below
+   * reads the whole block as one unbroken call, declines to hoist, and leaves
+   * the call repeating itself as the body's first row. Ignored when
+   * `contentPath` already answers. */
+  target?(args: ToolArgs): string | undefined;
   /** What pi writes after that path on the call row — a line range — kept
    * beside the target when the header is rebuilt from `args`. */
   targetSuffix?(args: ToolArgs): string | undefined;
@@ -1646,7 +1686,47 @@ const TOOL_PROFILES = new Map<string, ToolProfile>([
   // pi-ask. One question puts itself in the header via the usual target hoist;
   // several need saying, since only the first would otherwise be visible.
   ["ask", { iconless: true, summary: askQuestionSummary }],
+  // pi-subagents. A delegated agent, whose renderer writes its status rows
+  // directly under its call row with no blank line between them — so the walk
+  // is told what the call says, or the header names nothing and the body opens
+  // by repeating the call it was hoisted from.
+  ["subagent", { target: delegatedAgentTarget, targetSuffix: delegatedAgentSuffix }],
 ]);
+
+/** An `args` field worth reading: present, a string, and not blank — flattened
+ * the same way a target read off a rendered row is. An agent name is chosen by
+ * whoever wrote the agent, and a newline in one would otherwise reach a header
+ * bar that measures it as one row and draws it as two. */
+function argText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const flattened = sanitizeStatusText(escapeControlChars(stripAnsi(value)));
+  return flattened.length > 0 ? flattened : undefined;
+}
+
+/** How that tool spells its own call row: a management call as `<action>
+ * <target>`, a plain launch as `<agent>`. A workflow launch it spells from a
+ * manifest that cannot be rebuilt from `args` alone, so that one is left
+ * unclaimed and keeps pi's row — an unhoisted call is a repeated word, while a
+ * wrong claim would cut the block in the wrong place. */
+function delegatedAgentTarget(args: ToolArgs): string | undefined {
+  const action = argText(args.action);
+  // `chainName` names the target of a management call only. A launch is spelled
+  // from `agent` alone, so consulting it there would predict a name the row
+  // never carries — declining for the wrong reason rather than the right one.
+  if (action) {
+    const target = argText(args.agent) ?? argText(args.chainName);
+    return target ? `${action} ${target}` : action;
+  }
+  if (argText(args.workflowScript)) return undefined;
+  return argText(args.agent);
+}
+
+/** It marks a background launch `[async]` after the agent, and only there —
+ * the same branch its own renderer adds it in. */
+function delegatedAgentSuffix(args: ToolArgs): string {
+  if (argText(args.action) || argText(args.workflowScript)) return "";
+  return args.async === true ? " [async]" : "";
+}
 
 function askQuestionSummary(args: ToolArgs): string | undefined {
   const questions = args.questions;
@@ -1773,23 +1853,38 @@ function callRunEnd(
   toolName: string,
   path: string | undefined,
   suffix: string,
+  exact = false,
 ): { end: number; matched: boolean } {
   // `matched` is the whole point of the walk: a call the code could not read
   // must not be renamed from `args`, or the header spells a target the rows
   // beneath it still spell too. Ending on the first row is not that signal —
   // a call that fits one row ends there having matched.
+  //
+  // `exact` is for text predicted from a profile's `target`. A prefix match is
+  // safe for a path, where pi writes the row and the profile only has to spell
+  // what pi spelled; it is not safe for a guess about another extension's
+  // renderer, because whatever the guess failed to predict is trailing text on
+  // a row about to be consumed — and consuming it deletes it from the display.
+  // Requiring the whole row turns every wrong guess into a declined hoist.
   const gaveUp = { end: Math.min(runEnd, first + 1), matched: false };
   if (path === undefined) return gaveUp;
-  const want = `${toolName}${shortenPath(path)}${suffix}`.replace(/\s+/g, "");
+  // A path is folded the way pi spells one on a row. A target that is not a
+  // path is whatever it is: folding a home prefix into it could only stop it
+  // matching text that never had one.
+  const want = `${toolName}${exact ? path : shortenPath(path)}${suffix}`.replace(/\s+/g, "");
   let seen = "";
   for (let i = first; i < runEnd; i++) {
     seen += stripAnsi(rows[i]).replace(/\s+/g, "");
     if (seen.length >= want.length) {
-      return seen.startsWith(want) ? { end: i + 1, matched: true } : gaveUp;
+      const hit = exact ? seen === want : seen.startsWith(want);
+      return hit ? { end: i + 1, matched: true } : gaveUp;
     }
     if (!want.startsWith(seen)) return gaveUp;
   }
-  return { end: runEnd, matched: true };
+  // The rows ran out with the prediction unfinished. For a path that is the
+  // call ending exactly where it was expected to; for a guess it means the
+  // guess was longer than the row, which is not a match.
+  return exact ? gaveUp : { end: runEnd, matched: true };
 }
 
 /** A path the way omp shows one: relative to the directory the session is in,
@@ -3445,10 +3540,12 @@ function patchToolCallFraming(): void {
       // rows behind rather than having them swallowed — what is left short of
       // the end is what forbids the single-row collapse below.
       const profilePath = profile?.contentPath?.(asToolArgs(this.args));
-      const profileSuffix = profilePath ? (profile?.targetSuffix?.(asToolArgs(this.args)) ?? "") : "";
+      const profileName = profilePath === undefined ? profile?.target?.(asToolArgs(this.args)) : undefined;
+      const profileTarget = profilePath ?? profileName;
+      const profileSuffix = profileTarget ? (profile?.targetSuffix?.(asToolArgs(this.args)) ?? "") : "";
       let runEnd = first;
       while (runEnd < last && !isBlankRenderedLine(rawCall[runEnd])) runEnd++;
-      const call = callRunEnd(rawCall, first, runEnd, this.toolName, profilePath, profileSuffix);
+      const call = callRunEnd(rawCall, first, runEnd, this.toolName, profileTarget, profileSuffix, profileName !== undefined);
       const callEnd = call.end;
       let bodyStart = callEnd;
       while (bodyStart < last && isBlankRenderedLine(rawCall[bodyStart])) bodyStart++;
@@ -3469,11 +3566,21 @@ function patchToolCallFraming(): void {
       // reading that row threw — which the guard turned into a session with no
       // framing at all rather than a crash, but neither is the intent.
       const callRow = first < last ? rawCall[first] : "";
-      const target = profilePath && (call.matched || runEnd === first + 1)
-        ? `${displayToolPath(profilePath)}${profileSuffix}`
-        : runEnd > first + 1
-          ? ""
-          : toolCallRowTarget(callRow, this.toolName);
+      // A predicted name is trusted only as far as the walk confirmed it.
+      // `contentPath` keeps the older allowance — a single-row call the walk
+      // could not parse is still named from `args`, because pi writes those
+      // rows itself and a one-row call leaves nothing behind to contradict the
+      // header. A `target` gets no such allowance: it predicts a foreign
+      // renderer's spelling, so an unconfirmed one falls back to the row, which
+      // cannot be wrong about what the row said.
+      const named = profilePath
+        ? call.matched || runEnd === first + 1
+          ? `${displayToolPath(profilePath)}${profileSuffix}`
+          : undefined
+        : call.matched && profileName !== undefined
+          ? `${profileName}${profileSuffix}`
+          : undefined;
+      const target = named ?? (runEnd > first + 1 ? "" : toolCallRowTarget(callRow, this.toolName));
       // omp marks a path target with a glyph in `muted`, one per filetype;
       // this carries the one file glyph rather than a devicon table.
       const targetGlyph = profilePath && target ? `${fgAnsi(HEX.overlay1)}${glyphs().node.scalar}${FG_RESET} ` : "";
@@ -3587,6 +3694,297 @@ function patchToolCallFraming(): void {
   } as typeof proto.render;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Widgets other extensions mount
+//
+// pi lets an extension mount a component above or below the editor, and one
+// showing background work uses that to say what is still running. Those rows
+// carry a spinner, but not a moving one: the glyph is picked by hashing the
+// work's own counters, so it holds still while a child thinks and then jumps
+// several frames at once when a burst of activity lands. omp animates on a
+// clock, and a clock is the only thing that can fix this — repainting more
+// often cannot move a glyph that is a function of counters rather than time.
+//
+// So the rows are decorated on their way out: the spinner is re-picked from
+// elapsed time, and the label beside it carries omp's band. Everything past
+// the label keeps whatever colours its own extension chose — the status word,
+// the model, the counts. A row that does not open with one of those spinner
+// glyphs comes back untouched, which is what leaves every other widget, and
+// every settled row of this one, exactly as it was.
+
+/** The glyphs a live row opens with. omp's own braille cycle, which is why
+ * substituting our frame changes nothing but the timing. */
+const WIDGET_SPINNER_GLYPHS = new Set(OMP_WORKING_FRAMES);
+
+/** Widgets whose rows this knows the shape of, by the key pi mounts them under.
+ *
+ * An allowlist rather than a shape test, because no shape test can do this job:
+ * those spinner glyphs are ordinary braille dot patterns, so `⠇ queue · 3
+ * pending` and `⠙ ⣀⣤⣶⣿ · mem` are indistinguishable from a status row by any
+ * rule written about their characters — one is a spinner and one is a chart,
+ * and both would be rewritten on every frame by a rule loose enough to catch
+ * the first. The key is exact, and a widget this does not recognize is left
+ * entirely alone, which is the right default for someone else's drawing. */
+const ANIMATED_WIDGET_KEYS = new Set(["subagent-async", "subagent-fleet-status"]);
+
+/** What may precede the glyph on a row this animates: indentation and the tree
+ * drawing a widget uses to nest its children. Several agents at once put every
+ * per-agent row behind a `├─`, and those are the rows most worth animating. */
+const WIDGET_LEAD_CHARS = new Set([" ", "├", "└", "│", "┃", "─", "╭", "╰", "┌", "┘", "∟", "⎿"]);
+
+/** What ends a widget label and begins its statistics. */
+const WIDGET_LABEL_END = " · ";
+
+/** Past this a label is a sentence rather than a name, and omp does not sweep
+ * sentences. Such a row keeps its own colours. */
+const WIDGET_LABEL_MAX_CELLS = 48;
+
+/** omp's band over a run of text, positioned in cells rather than picked from a
+ * precomputed list. The working line can precompute — its label holds still for
+ * a whole turn — but a widget's label changes with the work it names, so this
+ * takes the position from the clock and colours one pass.
+ *
+ * There is no seamlessness to arrange here either, which is why the gap is
+ * omp's plain ten rather than the searched one: a continuous position modulo
+ * the period re-enters smoothly whatever the period is. */
+function shimmerRun(text: string, accent: string, position: number): string {
+  let cell = 0;
+  return graphemeCells(text)
+    .map(cluster => {
+      const intensity = shimmerIntensity(Math.abs(cell + SHIMMER_PADDING_PREFERRED - position));
+      cell += visibleWidth(cluster);
+      const color =
+        intensity >= SHIMMER_TIER_HIGH ? accent : intensity >= SHIMMER_TIER_MID ? HEX.overlay1 : HEX.overlay0;
+      const bold = intensity >= SHIMMER_TIER_HIGH ? "\x1b[1m" : "";
+      const boldReset = intensity >= SHIMMER_TIER_HIGH ? "\x1b[22m" : "";
+      return `${bold}${fgAnsi(color)}${cluster}${FG_RESET}${boldReset}`;
+    })
+    .join("");
+}
+
+/** The same sequences `stripAnsi` knows, matched at a position. The two must
+ * agree: one counts the plain characters, the other finds the byte they start
+ * at, and a sequence only one of them recognizes puts the cut in the wrong
+ * place. A CSI-only pattern here used to miss an OSC hyperlink. */
+const ANSI_SEQUENCE_AT = new RegExp(ANSI_SEQ.source, "y");
+
+/** A hyperlink or a terminal marker, which a rebuilt head would drop the
+ * opening half of. Cheaper to leave such a row undecorated than to carry it. */
+const OSC_OR_APC = /\x1b[\]_]/;
+
+/** Where the `index`-th plain character starts, in bytes. */
+function ansiOffsetOf(row: string, index: number): number {
+  let plain = 0;
+  let cursor = 0;
+  while (cursor < row.length && plain < index) {
+    ANSI_SEQUENCE_AT.lastIndex = cursor;
+    if (ANSI_SEQUENCE_AT.exec(row)) {
+      cursor = ANSI_SEQUENCE_AT.lastIndex;
+      continue;
+    }
+    cursor += (row.codePointAt(cursor) ?? 0) > 0xffff ? 2 : 1;
+    plain++;
+  }
+  return cursor;
+}
+
+/** The row up to `index` plain characters, kept as it was drawn — the tree a
+ * widget nests its children with is that widget's, not ours, so it keeps its
+ * own colour. Closed with a reset so the spinner after it carries ours. */
+function ansiHeadTo(row: string, index: number): string {
+  const head = row.slice(0, ansiOffsetOf(row, index));
+  return head.includes("\x1b") ? `${head}${FG_RESET}` : head;
+}
+
+/** The row from `index` plain characters in, raw. The head it replaces is
+ * rebuilt and closed with a reset, and these rows open and close every colour
+ * in place, so the tail needs no state carried into it. */
+function ansiTailFrom(row: string, index: number): string {
+  return row.slice(ansiOffsetOf(row, index));
+}
+
+/** One widget row with omp's clock over it, or `undefined` when this is not a
+ * row that says work is happening. */
+function decorateWidgetRow(row: string, accent: string, elapsedMs: number): string | undefined {
+  // A hyperlink or a terminal marker in the label would be rebuilt without its
+  // opening sequence — the text and the width survive, but the link does not.
+  // Leaving such a row alone costs an animation; rewriting it costs a feature
+  // of somebody else's widget.
+  if (OSC_OR_APC.test(row)) return undefined;
+  const chars = [...stripAnsi(row)];
+  let glyph = 0;
+  while (glyph < chars.length && WIDGET_LEAD_CHARS.has(chars[glyph]!)) glyph++;
+  if (glyph >= chars.length || !WIDGET_SPINNER_GLYPHS.has(chars[glyph]!)) return undefined;
+
+  // Two more things have to hold before this counts as a status row. These
+  // glyphs are ordinary braille dot patterns — the usual medium for a terminal
+  // sparkline — so a chart drawn with them would otherwise have its first cell
+  // overwritten by a spinner frame on every repaint, and would hold the clock
+  // on forever besides. A spinner is followed by a space, and the row carries
+  // the tool's own ` · ` before its statistics; a drawing does neither.
+  if (chars[glyph + 1] !== " ") return undefined;
+  let start = glyph + 1;
+  while (start < chars.length && chars[start] === " ") start++;
+  const rest = chars.slice(start).join("");
+  const cut = rest.indexOf(WIDGET_LABEL_END);
+  if (cut === -1) return undefined;
+  const label = rest.slice(0, cut).trimEnd();
+  if (label.length === 0 || visibleWidth(label) > WIDGET_LABEL_MAX_CELLS) return undefined;
+
+  const spinner = OMP_WORKING_FRAMES[Math.floor(elapsedMs / SPINNER_ADVANCE_MS) % OMP_WORKING_FRAMES.length]!;
+  const period = visibleWidth(label) + 2 * SHIMMER_PADDING_PREFERRED;
+  const position = ((elapsedMs / 1000) * SHIMMER_SPEED_CELLS_PER_S) % period;
+  const head =
+    `${ansiHeadTo(row, glyph)}${fgAnsi(accent)}${spinner}${FG_RESET}` +
+    `${" ".repeat(start - glyph - 1)}${shimmerRun(label, accent, position)}${FG_RESET}`;
+  const decorated = `${head}${ansiTailFrom(row, start + [...label].length)}`;
+  // These rows are padded to the width pi rendered them at, and pi kills the
+  // TUI over a row wider than the terminal. A replacement that is not the same
+  // width as what it replaced is declined rather than reasoned about.
+  return visibleWidth(decorated) === visibleWidth(row) ? decorated : undefined;
+}
+
+interface WidgetHost {
+  requestRender?(force?: boolean): void;
+}
+
+type PatchableInteractive = { __ompWidgetAnimated?: boolean };
+
+/** Components already carrying the decorated `render`, so a factory that hands
+ * back a cached object is not wrapped again on every remount. */
+const wrappedWidgets = new WeakSet<object>();
+
+let widgetAnimationDisabled = false;
+let widgetTicker: ReturnType<typeof setInterval> | undefined;
+/** One epoch for every widget, so two live rows sweep in step rather than each
+ * from whenever its own component happened to be built. */
+const widgetEpoch = Date.now();
+
+/** When a live row was last drawn. The clock is driven by this stamp rather
+ * than by the outcome of whichever render happened last, because neither of the
+ * two obvious signals is reliable:
+ *
+ * pi renders every mounted widget within a single frame, so a widget with
+ * nothing running would otherwise stop the clock that the live widget beside it
+ * had just started — one extension mounting a second component widget was
+ * enough to freeze the animation entirely.
+ *
+ * And a widget can leave without its owner saying so: `clearExtensionWidgets`
+ * empties pi's maps directly, so the last thing this sees is a live row, and a
+ * clock stopped only by a later render would run forever over an empty screen.
+ * A stamp going stale covers both, and covers whatever third path exists. */
+let widgetLiveAt = 0;
+
+/** How long after the last live row the clock keeps running. Two frames of
+ * slack, so a repaint that happens to land between widget renders does not
+ * chop the animation. */
+const WIDGET_LIVE_GRACE_MS = WORKING_FRAME_MS * 3;
+
+function startWidgetTicker(host: WidgetHost): void {
+  if (widgetTicker !== undefined) return;
+  // The rows are only redrawn when something asks pi to render, and the
+  // extension that owns them asks twice a second. omp's band moves at 30 cells
+  // a second, so it has to be asked for on omp's clock instead.
+  widgetTicker = setInterval(() => {
+    if (Date.now() - widgetLiveAt > WIDGET_LIVE_GRACE_MS) {
+      // Ask for one more frame on the way out. The stamp also goes stale when
+      // the event loop was simply blocked for longer than the grace — a large
+      // read, a long highlight — and stopping silently there would leave live
+      // work unanimated until something else happened to render. A render
+      // re-stamps if anything is still live, and costs one frame if not.
+      host.requestRender?.();
+      stopWidgetTicker();
+      return;
+    }
+    host.requestRender?.();
+  }, WORKING_FRAME_MS);
+  widgetTicker.unref?.();
+}
+
+function stopWidgetTicker(): void {
+  if (widgetTicker === undefined) return;
+  clearInterval(widgetTicker);
+  widgetTicker = undefined;
+}
+
+/** Decorate a widget's rows, and stamp the clock if any of them was live. */
+function animateWidgetRows(rows: string[], host: WidgetHost): string[] {
+  const elapsed = Date.now() - widgetEpoch;
+  const accent = currentCtx ? workingAccent(currentCtx) : HEX.peach;
+  let live = 0;
+  const decorated = rows.map(row => {
+    const swept = decorateWidgetRow(row, accent, elapsed);
+    if (swept === undefined) return row;
+    live++;
+    return swept;
+  });
+  if (live > 0) {
+    widgetLiveAt = Date.now();
+    startWidgetTicker(host);
+  }
+  return decorated;
+}
+
+function patchWidgetAnimation(): void {
+  const proto = InteractiveMode.prototype as unknown as PatchableInteractive & {
+    setExtensionWidget(key: string, content: unknown, options?: unknown): void;
+  };
+  if (proto.__ompWidgetAnimated) return;
+  proto.__ompWidgetAnimated = true;
+
+  const original = proto.setExtensionWidget;
+  proto.setExtensionWidget = function (this: unknown, key: string, content: unknown, options?: unknown): void {
+    // A widget given as plain rows is a fixed list pi wraps itself; there is no
+    // render of ours to sit in front of, and nothing there animates anyway.
+    if (widgetAnimationDisabled || typeof content !== "function" || !ANIMATED_WIDGET_KEYS.has(key)) {
+      if (content === undefined) stopWidgetTicker();
+      return original.call(this, key, content, options);
+    }
+    const factory = content as (host: WidgetHost, theme: unknown) => { render(width: number): string[] };
+    const wrapped = (host: WidgetHost, theme: unknown): { render(width: number): string[] } => {
+      const component = factory(host, theme);
+      // A factory is free to hand back the same object every time — an
+      // extension keeping widget state across remounts does exactly that — and
+      // wrapping an already-wrapped component would bind the previous wrapper
+      // and add a layer per remount, until the call depth or the frame budget
+      // gave out. The existing wrapper already animates it, so leave it be.
+      if (wrappedWidgets.has(component)) return component;
+      // The component is handed back as it was built, with only its `render`
+      // replaced: pi may call anything else the owning extension put on it.
+      const innerRender = component.render.bind(component);
+      const animated = (width: number): string[] => {
+        const rows = innerRender(width);
+        if (widgetAnimationDisabled) return rows;
+        try {
+          return animateWidgetRows(rows, host);
+        } catch (error) {
+          widgetAnimationDisabled = true;
+          stopWidgetTicker();
+          reportDegraded("widget-animation", error, {
+            width,
+            key,
+            rows: rows.length,
+            "first row": safeProbe(() => JSON.stringify(stripAnsi(rows[0] ?? "").slice(0, 80))),
+          });
+          return rows;
+        }
+      };
+      // A component whose `render` cannot be written to — frozen, or defined as
+      // a getter — mounts perfectly well without this, so failing to decorate it
+      // must cost nothing. Throwing here would take away a widget pi was going
+      // to draw, which is a worse outcome than an unanimated one.
+      try {
+        component.render = animated;
+        wrappedWidgets.add(component);
+      } catch {
+        return component;
+      }
+      return component;
+    };
+    return original.call(this, key, wrapped, options);
+  };
+}
+
 const GLYPH_PRESET_NAMES: readonly GlyphPreset[] = ["nerd", "unicode"];
 
 // One command named after the extension, with the setting as a subcommand, so
@@ -3604,6 +4002,7 @@ const GLYPH_STATUS_KEY = "omp-feel-glyphs";
 
 export default function ompFeelExtension(pi: ExtensionAPI) {
   patchToolCallFraming();
+  patchWidgetAnimation();
   loadSettings();
 
   pi.registerFlag(GLYPH_FLAG, {
@@ -3815,6 +4214,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     agentWorking = false;
     stopSpinnerRotation();
+    stopWidgetTicker();
     activeFooter?.dispose();
     activeTui = undefined;
     activeFooter = undefined;
