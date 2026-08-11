@@ -1496,17 +1496,23 @@ function callRunEnd(
   toolName: string,
   path: string | undefined,
   suffix: string,
-): number {
-  const single = Math.min(runEnd, first + 1);
-  if (path === undefined) return single;
+): { end: number; matched: boolean } {
+  // `matched` is the whole point of the walk: a call the code could not read
+  // must not be renamed from `args`, or the header spells a target the rows
+  // beneath it still spell too. Ending on the first row is not that signal —
+  // a call that fits one row ends there having matched.
+  const gaveUp = { end: Math.min(runEnd, first + 1), matched: false };
+  if (path === undefined) return gaveUp;
   const want = `${toolName}${shortenPath(path)}${suffix}`.replace(/\s+/g, "");
   let seen = "";
   for (let i = first; i < runEnd; i++) {
     seen += stripAnsi(rows[i]).replace(/\s+/g, "");
-    if (seen.length >= want.length) return seen.startsWith(want) ? i + 1 : single;
-    if (!want.startsWith(seen)) return single;
+    if (seen.length >= want.length) {
+      return seen.startsWith(want) ? { end: i + 1, matched: true } : gaveUp;
+    }
+    if (!want.startsWith(seen)) return gaveUp;
   }
-  return runEnd;
+  return { end: runEnd, matched: true };
 }
 
 /** A path the way omp shows one: relative to the directory the session is in,
@@ -3162,18 +3168,20 @@ function patchToolCallFraming(): void {
       const profileSuffix = profilePath ? (profile?.targetSuffix?.(asToolArgs(this.args)) ?? "") : "";
       let runEnd = first;
       while (runEnd < last && !isBlankRenderedLine(rawCall[runEnd])) runEnd++;
-      const callEnd = callRunEnd(rawCall, first, runEnd, this.toolName, profilePath, profileSuffix);
+      const call = callRunEnd(rawCall, first, runEnd, this.toolName, profilePath, profileSuffix);
+      const callEnd = call.end;
       let bodyStart = callEnd;
       while (bodyStart < last && isBlankRenderedLine(rawCall[bodyStart])) bodyStart++;
 
-      // A tool that says where its path lives is named from `args`, so the
-      // header reads the same whether or not the row wrapped — and reads it
-      // omp's way, relative to the directory the session is in, where pi
-      // spells it from home. Anything else keeps whatever the row said.
-      // A tool that declares no path can only be read off the row, and a row
-      // that wrapped holds half its target — hoisting that would tear the call
-      // across the header and the body, so it stays whole where pi drew it.
-      const target = profilePath
+      // A call the walk recognized is named from `args`, so the header reads
+      // the same whether or not the row wrapped — and reads it omp's way,
+      // relative to the directory the session is in, where pi spells it from
+      // home. Everything else falls back to the row, and a row that wrapped
+      // holds only half its target, so hoisting is declined rather than
+      // tearing the call across the header and the body. pi spells some reads
+      // its own way (`read resource …`, `[skill] …`), which is exactly the
+      // case that lands here.
+      const target = profilePath && call.matched
         ? `${displayToolPath(profilePath)}${profileSuffix}`
         : runEnd > first + 1
           ? ""
