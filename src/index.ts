@@ -3772,6 +3772,13 @@ const ANSI_SEQUENCE_AT = new RegExp(ANSI_SEQ.source, "y");
  * opening half of. Cheaper to leave such a row undecorated than to carry it. */
 const OSC_OR_APC = /\x1b[\]_]/;
 
+/** Any control character but ESC. A row carrying one does not occupy the single
+ * terminal line pi accounted for — a newline or a tab in a tool preview is the
+ * usual way that happens — so the rows below it are already displaced. Nothing
+ * here can repair that, but repainting over it stacks another copy every frame,
+ * which turns one displaced row into a trail of them. */
+const CONTROL_IN_ROW = /[\u0000-\u001a\u001c-\u001f\u007f]/;
+
 /** Where the `index`-th plain character starts, in bytes. */
 function ansiOffsetOf(row: string, index: number): number {
   let plain = 0;
@@ -3909,6 +3916,13 @@ function stopWidgetTicker(): void {
 
 /** Decorate a widget's rows, and stamp the clock if any of them was live. */
 function animateWidgetRows(rows: string[], host: WidgetHost): string[] {
+  // One malformed row disqualifies the whole widget, not just itself: the
+  // damage is to the rows below it, and those are the ones a repaint would
+  // duplicate. Leaving the widget alone lets its own extension settle it.
+  if (rows.some(row => CONTROL_IN_ROW.test(row))) {
+    stopWidgetTicker();
+    return rows;
+  }
   const elapsed = Date.now() - widgetEpoch;
   const accent = currentCtx ? workingAccent(currentCtx) : HEX.peach;
   let live = 0;
