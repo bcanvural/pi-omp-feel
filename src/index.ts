@@ -1116,7 +1116,8 @@ const DEGRADED_ASSUMPTIONS: Record<DegradedSubsystem, string[]> = {
     "That factory is called `(tui, theme)` with pi's own `TUI` as the first argument, so `requestRender()` is reachable through it. The component it returns is rendered by pi on every frame, and its `render` can be replaced in place — the object itself is handed back untouched, since the owning extension may have put anything else on it.",
     "Only widgets whose key is in `ANIMATED_WIDGET_KEYS` are touched at all — the shape of a live row cannot be told from a braille chart by any rule about its characters, so recognition is by key. Within one of those, a live row is indentation or tree drawing, then one of `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, then a space, then its label, then ` · ` before the statistics. A row shaped any other way is returned exactly as it arrived.",
     "Widget rows arrive padded to the width they were rendered at, so a decoration must preserve a row's visible width exactly; any replacement that would not is declined rather than emitted. `visibleWidth` cannot see a grapheme cluster split between two colours — it segments the same way — so the band moves a cluster at a time instead of relying on that check.",
-    "pi renders every mounted widget within a single frame, and `clearExtensionWidgets` empties its widget maps without going through `setExtensionWidget`. The animation clock is therefore driven by when a live row was last drawn rather than by the last render's outcome, so neither a quiet widget beside a live one nor an unannounced unmount can leave it stuck on or off.",
+    "pi renders every mounted widget within a single frame, and `clearExtensionWidgets` empties its widget maps without going through `setExtensionWidget`. The animation clock is therefore driven by when a live row was last drawn rather than by the last render's outcome, so neither a quiet widget beside a live one nor an unannounced unmount can leave it stuck on or off. For the same reason the agent count is cleared at both session boundaries, where that unannounced clearing lands.",
+    "At most one widget row says how many agents are running, and it says it in prose (`WIDGET_AGENT_COUNT`). Only a match writes the count, so rows that stop carrying the wording — an expanded roster, or wording that changed — hold the last number rather than clearing it. The number can therefore lag the truth in either direction for as long as the widget goes without saying it, and the segment disappears entirely whenever the widget does; what it can never do is invent a count from row shapes. The scan runs over every animated widget, so were a second one to carry the same wording, the count would be whatever rendered last, and two disagreeing widgets would each write and invalidate every frame — pi coalesces the duplicate render requests, but the frame it schedules re-arms the next one, so that is a sustained loop rather than cache churn. Telling them apart would need name-keyed knowledge of a foreign widget's text beyond the key allowlist, which costs more than the case is worth.",
   ],
   "prompt-framing": [
     "The stock pi `Editor` draws its top and bottom border as rows containing only `─` (see `isFlatBorderLine`).",
@@ -3804,6 +3805,12 @@ function noteAgentCount(rows: readonly string[]): void {
     // for every widget frame, and invalidating 25 times a second would throw
     // away the cache the bar exists to keep.
     activeFooter?.invalidate();
+    // The bar is the editor's top border, and the widget saying this can be
+    // mounted on either side of the editor — below it, pi has already drawn the
+    // bar by the time these rows arrive, so the new count would sit unpainted
+    // until something unrelated asked for a frame. Which side a foreign widget
+    // picks is not ours to know, so ask for the frame either way.
+    activeTui?.requestRender();
     return;
   }
 }
@@ -4205,6 +4212,13 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     agentWorking = false;
     stopSpinnerRotation();
     activeFooter = undefined;
+    // Nor is it the session those agents were counted in. pi clears extension
+    // widgets by emptying its own maps rather than by removing each one, so the
+    // removal this would otherwise learn from never arrives and the count would
+    // be carried into a session where nothing is running. Costs nothing if work
+    // really is still live: the widget says so again on its next frame. Set
+    // rather than forgotten — the bar it would invalidate is gone a line above.
+    observedAgentCount = 0;
     refreshSessionName(ctx);
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
 
@@ -4282,6 +4296,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     agentWorking = false;
     stopSpinnerRotation();
     stopWidgetTicker();
+    observedAgentCount = 0;
     activeFooter?.dispose();
     activeTui = undefined;
     activeFooter = undefined;
