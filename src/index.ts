@@ -469,6 +469,14 @@ function pathSegment(ctx: ExtensionContext, maxLength: number): Segment {
   return { content: `${fgAnsi(HEX.teal)}${ICON.folder} ${pwd}${FG_RESET}`, visible: true };
 }
 
+/** omp's `subagentsSegment`: an icon and a count, hidden when nothing is
+ * running. */
+function agentsSegment(): Segment {
+  const count = activeAgentCount();
+  if (count <= 0) return { content: "", visible: false };
+  return { content: `${fgAnsi(HEX.lavender)}${glyphs().status.bullet} ${count}${FG_RESET}`, visible: true };
+}
+
 function gitSegment(footerData: ReadonlyFooterDataProvider): Segment {
   const branch = footerData.getGitBranch();
   if (!branch) return { content: "", visible: false };
@@ -641,6 +649,7 @@ class OmpFooter {
         gitSegment(this.footerData),
         contextPercentSegment(ctx, contextUsage),
         costSegment(usageTotals),
+        agentsSegment(),
       ]) {
         if (segment.visible && segment.content) left.push(segment.content);
       }
@@ -3772,6 +3781,46 @@ const ANSI_SEQUENCE_AT = new RegExp(ANSI_SEQ.source, "y");
  * opening half of. Cheaper to leave such a row undecorated than to carry it. */
 const OSC_OR_APC = /\x1b[\]_]/;
 
+/** How many agents another extension last said were running, and when it said
+ * so. omp carries this on its status line (`subagentsSegment`), and pi has no
+ * equivalent — but the widget already spells it out in prose, and we are
+ * reading those rows anyway. Reading its own words back is self-verifying: if
+ * it stops saying this, or says it differently, the segment simply stops
+ * appearing rather than showing a number invented from row shapes. */
+let observedAgentCount = 0;
+
+/** The wording, from the row a subagent widget closes with. */
+const WIDGET_AGENT_COUNT = /(\d+)\s+active\s+agents?\b/;
+
+function noteAgentCount(rows: readonly string[]): void {
+  for (const row of rows) {
+    const seen = WIDGET_AGENT_COUNT.exec(stripAnsi(row));
+    if (!seen) continue;
+    const count = Number(seen[1]);
+    if (count === observedAgentCount) return;
+    observedAgentCount = count;
+    // The bar caches on width alone, so a segment whose value changed without
+    // saying so would never be drawn again. Only on a real change: this runs
+    // for every widget frame, and invalidating 25 times a second would throw
+    // away the cache the bar exists to keep.
+    activeFooter?.invalidate();
+    return;
+  }
+}
+
+function activeAgentCount(): number {
+  return observedAgentCount;
+}
+
+/** The widget going away is the end of the work it was counting. That is an
+ * event this can see, where time passing is not — and the bar caches, so a
+ * count that expired on a clock would sit there until something else redrew. */
+function forgetAgentCount(): void {
+  if (observedAgentCount === 0) return;
+  observedAgentCount = 0;
+  activeFooter?.invalidate();
+}
+
 /** Any control character but ESC. A row carrying one does not occupy the single
  * terminal line pi accounted for — a newline or a tab in a tool preview is the
  * usual way that happens — so the rows below it are already displaced. Nothing
@@ -3916,6 +3965,7 @@ function stopWidgetTicker(): void {
 
 /** Decorate a widget's rows, and stamp the clock if any of them was live. */
 function animateWidgetRows(rows: string[], host: WidgetHost): string[] {
+  noteAgentCount(rows);
   // One malformed row disqualifies the whole widget, not just itself: the
   // damage is to the rows below it, and those are the ones a repaint would
   // duplicate. Leaving the widget alone lets its own extension settle it.
@@ -3951,7 +4001,10 @@ function patchWidgetAnimation(): void {
     // A widget given as plain rows is a fixed list pi wraps itself; there is no
     // render of ours to sit in front of, and nothing there animates anyway.
     if (widgetAnimationDisabled || typeof content !== "function" || !ANIMATED_WIDGET_KEYS.has(key)) {
-      if (content === undefined) stopWidgetTicker();
+      if (content === undefined) {
+        stopWidgetTicker();
+        if (ANIMATED_WIDGET_KEYS.has(key)) forgetAgentCount();
+      }
       return original.call(this, key, content, options);
     }
     const factory = content as (host: WidgetHost, theme: unknown) => { render(width: number): string[] };
