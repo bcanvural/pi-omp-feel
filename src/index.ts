@@ -921,7 +921,10 @@ function startSpinnerRotation(): void {
  * run long (a 31-cell strip needs 340 frames where 32 needs 40). The extra
  * cell is never drawn; it only lets the band travel over an even period. */
 function shimmerCells(label: string): number {
-  const strip = graphemeCells(label).length + 1 + graphemeCells(OMP_WORKING_HINT).length;
+  // Columns, not clusters: the period the band travels has to match the width
+  // the strip actually occupies, or a wide cluster would leave the band short of
+  // the end. Identical for one-column clusters, which is every label today.
+  const strip = visibleWidth(label) + 1 + visibleWidth(OMP_WORKING_HINT);
   return strip % 2 === 0 ? strip : strip + 1;
 }
 
@@ -1020,9 +1023,15 @@ function workingMessage(label: string, accent: string, frame: number): string {
   const padding = shimmerPadding(shimmerCells(label));
   const position = (frame * SHIMMER_CELLS_PER_FRAME) % shimmerPeriod(label);
 
+  // Stepped by the columns a cluster occupies, not by how many clusters have
+  // gone by, so the band sits where it is drawn rather than where it was
+  // counted. The two agree for anything one column wide, which is every label
+  // in the list today; `shimmerRun` positions its band the same way.
+  let cell = 0;
   return cells
     .map((character, index) => {
-      const distance = Math.abs(index + padding - position);
+      const distance = Math.abs(cell + padding - position);
+      cell += visibleWidth(character);
       const intensity = shimmerIntensity(distance);
       // The hint peaks lavender; the label peaks in the session accent.
       const peak = index > labelCells.length ? HEX.lavender : accent;
