@@ -1,15 +1,18 @@
 # pi-omp-feel
 
-Ports the oh-my-pi (`omp`) "feel" to the pi coding agent via a pi extension.
+Ports the "feel" of [**omp**](https://github.com/can1357/oh-my-pi) — can1357's
+oh-my-pi coding agent — to the pi coding agent, as a pi extension.
 
 ![A session in pi with the extension loaded](docs/demo.gif)
 
 *The captures here give an idea of the feel; the project moves quickly and they may
 trail the latest version.*
 
-## Which omp?
+## What it ports
 
-**omp is [github.com/can1357/oh-my-pi](https://github.com/can1357/oh-my-pi)** — a coding agent in its own right, installed via `scripts/install.sh` from that repo. Its TUI is what this extension reproduces, so the source references in the code point into its tree:
+omp is a coding agent in its own right, installed via `scripts/install.sh` from
+its repo. Its TUI is what this extension reproduces, so the source references in
+the code point into that tree:
 
 | reference in `src/index.ts` | file in omp |
 | --- | --- |
@@ -18,11 +21,6 @@ trail the latest version.*
 | tool-call block framing | `packages/coding-agent/src/tui/output-block.ts` |
 | editor top-border provider | `packages/tui/src/components/editor.ts` |
 | theme values | `packages/coding-agent/src/modes/theme/defaults/dark-catppuccin.json` |
-
-Do **not** confuse it with two unrelated things that answer to the same names:
-
-- **`oh-my-pi` on npm** (`acidsugarx/oh-my-pi`) — a multi-agent orchestration framework for pi. Different project, no TUI, no status line.
-- **`omp` / oh-my-posh** — the Go shell-prompt themer. Shares the powerline vocabulary (segments, `` separators, catppuccin) but is otherwise unrelated.
 
 - **Theme**: ships `omp-dark-catppuccin`, identical to omp's `dark-catppuccin` (Catppuccin Mocha, base `#1e1e2e`) except for the 16 `statusLine*`/`toolText`/`link` color keys that pi's theme schema cannot express — those are carried as hardcoded values in `src/index.ts` instead. The stock pi theme `catppuccin-mocha` draws on the same palette but **is not a substitute** — it assigns some keys differently, `accent` most visibly (blue `#89b4fa` where omp uses peach `#fab387`). Anything theme-driven, including other extensions' dialogs, follows that assignment; this extension's own colors are hardcoded and look right either way, which makes running the wrong theme easy to miss. If the omp feel looks half-applied, check `/theme` first.
 - **Status line**: a single-line editor top border replacing the built-in footer — model + thinking level, working directory, git branch, token/cost stats, context %, and session name — in an omp-style powerline-thin layout.
@@ -62,6 +60,13 @@ dashes apart from their letters, quoted text in green — over the `Output` divi
 ![A read row](docs/read.png)
 
 *A `read` settles to omp's single summary row, where pi's own wraps across three.*
+
+![A tool from another extension](docs/foreign-tool.png)
+
+*A tool from another extension that ships no renderer of its own: framed like any
+other, its label read as a title, its args on a dim `└─` line, and a JSON result
+rendered as omp's document tree — two levels and six lines deep until `ctrl+o`.
+This is what an MCP call looks like, without anything here knowing what MCP is.*
 
 ## Where this reaches past pi's public API
 
