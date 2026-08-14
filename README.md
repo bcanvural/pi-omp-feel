@@ -2,6 +2,11 @@
 
 Ports the oh-my-pi (`omp`) "feel" to the pi coding agent via a pi extension.
 
+![A session in pi with the extension loaded](docs/demo.gif)
+
+*The captures here give an idea of the feel; the project moves quickly and they may
+trail the latest version.*
+
 ## Which omp?
 
 **omp is [github.com/can1357/oh-my-pi](https://github.com/can1357/oh-my-pi)** — a coding agent in its own right, installed via `scripts/install.sh` from that repo. Its TUI is what this extension reproduces, so the source references in the code point into its tree:
@@ -36,6 +41,27 @@ Do **not** confuse it with two unrelated things that answer to the same names:
   Both settle into `~/.pi/agent/pi-omp-feel.json` beside the glyph preset.
 - **Tool-call framing**: tool calls (`bash`, `read`, `write`, `ssh`, `mcp`, …) render inside omp-style rounded blocks with state-colored borders over pi's usual state background tint. Bash follows omp's command-first layout with an `Output` divider; other default-rendered tools use status headers (`⏳`/`⟳`, `✘`, `❯`/`✎`/`⇄`/`🔌`) where applicable. `write` and `edit` close their header the way omp does, with `· 4 lines` and `⟨+1/-1⟩`. Tools registered by other extensions are framed too — see below.
 - **Collapsed windows, omp-sized**: collapsed blocks show what omp shows. Bash keeps a viewport-capped ten-line output tail (pi keeps five) and caps long commands to a viewport tail; `write` previews stream as a live 12-line tail and settle to the first 6 behind a dim line-number gutter (pi: a frozen, ungutted head of 10); a `read` settles to omp's single summary row even when pi's own row wrapped across three (omp's inline read preview is opt-in and ships off; set `readPreview: true` in `~/.pi/agent/pi-omp-feel.json` for what omp's setting gives). Diffs cap at omp's 8 hunks / 40 lines — thinning the context between hunks before hiding any hunk, and keeping a single over-budget hunk whole, exactly as omp's truncation does — mark indentation with dim `·`s, and syntax-highlight their context lines. All structural, so any tool rendering pi diff rows qualifies. `ctrl+o` lifts every one of these, exactly as before.
+
+## What it looks like
+
+![A write block](docs/write.png)
+
+*A `write` call: omp's rounded block, the `· 23 lines` header closing it, a dim
+line-number gutter, and the settled preview behind `⟨Ctrl+O: Expand⟩`.*
+
+![An edit block](docs/edit.png)
+
+*An `edit`: the `⟨+2/-2⟩` header, word-level highlights inside the changed line,
+syntax-highlighted context, and a shell command below it coloured omp's way — flag
+dashes apart from their letters, quoted text in green — over the `Output` divider.*
+
+![Markdown rendering](docs/markdown.png)
+
+*Markdown under the theme: heading, bullets, and a boxed table.*
+
+![A read row](docs/read.png)
+
+*A `read` settles to omp's single summary row, where pi's own wraps across three.*
 
 ## Where this reaches past pi's public API
 
