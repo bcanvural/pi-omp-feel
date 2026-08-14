@@ -61,6 +61,16 @@ dashes apart from their letters, quoted text in green — over the `Output` divi
 
 *A `read` settles to omp's single summary row, where pi's own wraps across three.*
 
+![A backgrounded-shell tool](docs/backgrounded-shell.png)
+
+*A tool that outlives its call gets exactly what omp gives bash — no header, the
+command first, output under the divider — while the window it draws for itself is
+left alone. What omp has no vocabulary for, the session it leaves behind and the
+log it writes, stays beside the `⟨Wall | Exit⟩` badge. Shown with
+[pi-runbg](https://github.com/bcanvural/pi-runbg), which turns every command into
+a long-lived background session the agent drives with writes and polls instead of
+one blocking call.*
+
 ![A tool from another extension](docs/foreign-tool.png)
 
 *A tool from another extension that ships no renderer of its own: framed like any
@@ -120,7 +130,7 @@ Some tools deserve better than that default, and `TOOL_PROFILES` in `src/index.t
 | `startLine` | first line number of that output, for the cell's gutter (`read`'s `offset`) |
 | `output` | command output in the tool result, so a collapsed sections block re-tails it at omp's ten lines. A tool that draws its own collapsed output window must not set this |
 
-Backgrounded-shell tools ship profiled: a command that outlives its call gets exactly what omp gives bash, and a keystroke stream into a live session keeps its header, because keystrokes are not a command. What omp has no vocabulary for — a session id, a log path — stays beside the badge rather than being folded into it. A tool that draws its own collapsed output window keeps it; the window's depth is that tool's setting, not this extension's.
+Backgrounded-shell tools such as [pi-runbg](https://github.com/bcanvural/pi-runbg) ship profiled: a command that outlives its call gets exactly what omp gives bash, and a keystroke stream into a live session keeps its header, because keystrokes are not a command. What omp has no vocabulary for — a session id, a log path — stays beside the badge rather than being folded into it. A tool that draws its own collapsed output window keeps it; the window's depth is that tool's setting, not this extension's.
 
 Tools that delegate to another agent ship profiled too, for a subtler reason. Where a call row ends is normally read off a blank row, but pi leaves none between a tool's call and its result — built-in renderers happen to open with one of their own, and a renderer that opens straight onto content does not. Such a block used to be read as one long unbroken call: nothing hoisted, and the body opening by repeating the very row the header should have carried. Telling the profile what the call row says fixes it, so the header names the agent and the body starts at its status. A launch spelled from something `args` cannot reconstruct is deliberately left alone — an unhoisted call costs one repeated word, where a wrong guess would cut the block in the wrong place.
 
