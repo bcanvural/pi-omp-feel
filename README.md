@@ -20,9 +20,9 @@ the code point into that tree:
 | context-usage thresholds and colors | `.../status-line/context-thresholds.ts` |
 | tool-call block framing | `packages/coding-agent/src/tui/output-block.ts` |
 | editor top-border provider | `packages/tui/src/components/editor.ts` |
-| theme values | `packages/coding-agent/src/modes/theme/defaults/dark-catppuccin.json` |
+| theme values | `packages/coding-agent/src/modes/theme/defaults/dark-catppuccin.json` and `dark-ember.json` |
 
-- **Theme**: ships `omp-dark-catppuccin`, identical to omp's `dark-catppuccin` (Catppuccin Mocha, base `#1e1e2e`) except for the 16 `statusLine*`/`toolText`/`link` color keys that pi's theme schema cannot express — those are carried as hardcoded values in `src/index.ts` instead. The stock pi theme `catppuccin-mocha` draws on the same palette but **is not a substitute** — it assigns some keys differently, `accent` most visibly (blue `#89b4fa` where omp uses peach `#fab387`). Anything theme-driven, including other extensions' dialogs, follows that assignment; this extension's own colors are hardcoded and look right either way, which makes running the wrong theme easy to miss. If the omp feel looks half-applied, check `/theme` first.
+- **Theme**: ships `omp-dark-catppuccin` and `omp-dark-ember`, matching omp's corresponding themes. The 16 `statusLine*`/`toolText`/`link` color keys that pi's theme schema cannot express are mirrored in `src/index.ts`; the extension switches its own status bar, tool frames, shell lexer, and shimmer when either theme is selected. The stock pi `catppuccin-mocha` theme draws on the same palette but **is not a substitute** — it assigns some keys differently, `accent` most visibly (blue `#89b4fa` where omp uses peach `#fab387`). If the omp feel looks half-applied, check `/theme` first.
 - **Status line**: a single-line editor top border replacing the built-in footer — model + thinking level, working directory, git branch, token/cost stats, context %, and session name — in an omp-style powerline-thin layout.
 - **Prompt input**: the input box is reshaped into omp's rounded-corner `╭──╮`/`╰──╯` frame with padded side rails and a correctly positioned cursor (via the supported `setEditorComponent` hook; editing, keybindings, and autocomplete stay on the stock `CustomEditor` core). The full status line occupies the top border, mirroring omp.
 - **Command rows**: a shell command is coloured the way omp colours one — the command and its arguments in blue, flag dashes apart from their letters, pipes and separators in mauve, quoted text in green with expansions breaking through it. pi highlights shells with highlight.js, which marks about one token in six of what omp marks, so this is a small lexer of its own rather than a theme setting; it was checked token for token against colours decoded from an omp capture.
@@ -235,6 +235,14 @@ Optionally set the theme:
 ```json
 {
   "theme": "omp-dark-catppuccin"
+}
+```
+
+For omp's One Dark-inspired palette, use `omp-dark-ember` instead:
+
+```json
+{
+  "theme": "omp-dark-ember"
 }
 ```
 

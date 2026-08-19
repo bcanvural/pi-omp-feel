@@ -11,41 +11,14 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFil
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CATPPUCCIN_HEX, DARK_EMBER_HEX, type OmpPalette, PALETTES } from "./palette.ts";
+import { highlightShellCommand, type ShellColors } from "./shell-lexer.ts";
 import { SPINNER_CATEGORIES } from "./spinner-words.ts";
 
-// ═══════════════════════════════════════════════════════════════════════════
-// omp dark-catppuccin palette (pi's Theme can't express status-line colors,
-// so the bar carries its own hardcoded omp colors — faithful regardless of the
-// active pi theme).
-//
-// Verified against omp's `theme/defaults/dark-catppuccin.json`: statusLineBg =
-// crust, statusLineSep = surface1, statusLineModel = pink, statusLinePath =
-// teal, statusLineGitClean = green, statusLineGitDirty = yellow,
-// statusLineContext = mauve, statusLineCost = maroon. The palette is kept whole
-// even where pi has no equivalent segment (`sky` is omp's statusLineUntracked).
-// ═══════════════════════════════════════════════════════════════════════════
-
-const HEX = {
-  crust: "#11111b",
-  surface1: "#45475a",
-  surface0: "#313244",
-  overlay0: "#6c7086",
-  overlay1: "#7f849c",
-  overlay2: "#9399b2",
-  text: "#cdd6f4",
-  peach: "#fab387",
-  pink: "#f5c2e7",
-  teal: "#94e2d5",
-  green: "#a6e3a1",
-  yellow: "#f9e2af",
-  sky: "#89dceb",
-  mauve: "#cba6f7",
-  maroon: "#eba0ac",
-  blue: "#89b4fa",
-  sapphire: "#74c7ec",
-  lavender: "#b4befe",
-  red: "#f38ba8",
-} as const;
+// omp palettes and the omp theme keys they stand in for live in `palette.ts`,
+// so `tests/palette-parity.test.ts` can verify them against omp's installed
+// themes without importing this module (and pi with it).
+let HEX: OmpPalette = CATPPUCCIN_HEX;
 
 function hexToRgb(hex: string): [number, number, number] {
   const h = hex.replace("#", "");
@@ -124,20 +97,23 @@ const ICON = {
   auto: "\u{f0068}",
 } as const;
 
-// Tool-block frame colors (omp dark-catppuccin): accent border while running or
-// pending, error while failing, dim when done; title always accent.
-//
-// `accent` is peach, not blue. omp resolves it to `peach` in its theme and a
-// capture of omp's own frames confirms the header glyph and label render
-// #fab387; #89b4fa is omp's `border` color, which its output blocks do not use.
+// Tool-block frame colors: accent border while running or pending, error while
+// failing, dim when done; title always accent. Getters keep these in lockstep
+// with the active palette instead of freezing Catppuccin at module load time.
 const HEX_TOOL = {
-  accent: HEX.peach,
-  error: HEX.red,
-  dim: HEX.overlay0,
-  // omp's `borderMuted`. Captures of its own frames show write blocks drawn with
-  // this rather than `dim`, which bash blocks use.
-  muted: HEX.surface0,
-} as const;
+  get accent(): string {
+    return HEX.peach;
+  },
+  get error(): string {
+    return HEX.red;
+  },
+  get dim(): string {
+    return HEX.overlay0;
+  },
+  get muted(): string {
+    return HEX.surface0;
+  },
+};
 
 /** Tools omp draws with `borderMuted` instead of `dim` once they have settled. */
 const TOOL_BORDER_MUTED = new Set(["write", "edit"]);
@@ -474,9 +450,16 @@ function pathSegment(ctx: ExtensionContext, maxLength: number): Segment {
 function agentsSegment(): Segment {
   const count = activeAgentCount();
   if (count <= 0) return { content: "", visible: false };
-  return { content: `${fgAnsi(HEX.lavender)}${glyphs().status.bullet} ${count}${FG_RESET}`, visible: true };
+  return { content: `${fgAnsi(HEX.subagents)}${glyphs().status.bullet} ${count}${FG_RESET}`, visible: true };
 }
 
+/** Known divergence. omp colours this segment `statusLineGitDirty` whenever the
+ * worktree has staged, unstaged or untracked changes and `statusLineGitClean`
+ * otherwise, and has no detached-HEAD case at all. pi's
+ * `ReadonlyFooterDataProvider` exposes only `getGitBranch()` — no dirty state —
+ * so the real condition is not reachable without shelling out to git on every
+ * repaint. A dirty repo therefore shows the clean colour here. The detached
+ * check is this extension's own idea, not something omp does. */
 function gitSegment(footerData: ReadonlyFooterDataProvider): Segment {
   const branch = footerData.getGitBranch();
   if (!branch) return { content: "", visible: false };
@@ -509,7 +492,7 @@ function contextPercentSegment(
         ? "warning"
         : "normal";
   const color =
-    level === "error" ? HEX.red : level === "warning" ? HEX.yellow : HEX.mauve;
+    level === "error" ? HEX.red : level === "warning" ? HEX.yellow : level === "purple" ? HEX.mauve : HEX.context;
   // omp hides this glyph when auto-compaction is off, but pi exposes no accessor
   // for that setting to extensions (only its RPC `set_auto_compaction` path
   // touches it), so assume pi's default of enabled. The probe stays so the glyph
@@ -591,6 +574,7 @@ class OmpFooter {
     // `setSessionName` (which emits `session_info_changed`) or the `--name` flag
     // at startup — both of which refresh it directly.
     this.cachedStatusBar = undefined;
+    this.cachedStatusLines = undefined;
   }
 
   /** Fold entries appended since the last refresh into the running totals. */
@@ -617,6 +601,7 @@ class OmpFooter {
   renderStatusBar(width: number): string {
     const ctx = this.getCtx();
     if (!ctx) return "";
+    syncThemePalette(ctx.ui.theme.name);
     if (this.cachedStatusBar?.width === width) return this.cachedStatusBar.value;
 
     const contextUsage = ctx.getContextUsage();
@@ -711,6 +696,8 @@ class OmpFooter {
   private cachedStatusLines?: { width: number; key: string; lines: string[] };
 
   render(width: number): string[] {
+    const ctx = this.getCtx();
+    if (ctx) syncThemePalette(ctx.ui.theme.name);
     // Extension statuses render below the bar, like omp's hook status lines.
     // pi hands back its live Map, so this is called on every frame; the sort,
     // ANSI strip and width clamp cost 6-15 µs each time for content that only
@@ -1033,13 +1020,18 @@ function workingMessage(label: string, accent: string, frame: number): string {
       const distance = Math.abs(cell + padding - position);
       cell += visibleWidth(character);
       const intensity = shimmerIntensity(distance);
-      // The hint peaks lavender; the label peaks in the session accent.
-      const peak = index > labelCells.length ? HEX.lavender : accent;
+      // omp runs two shimmer palettes (`modes/theme/shimmer.ts`): the label peaks
+      // on `accent` with `bold: true`, the hint peaks on `borderAccent` with no
+      // bold at all. Under dark-ember both peaks resolve to #ff6f61, so the
+      // crests coincide there — omp's own doing, not a collapse introduced here.
+      const isHint = index > labelCells.length;
+      const peak = isHint ? HEX.lavender : accent;
       const color =
         intensity >= SHIMMER_TIER_HIGH ? peak : intensity >= SHIMMER_TIER_MID ? HEX.overlay1 : HEX.overlay0;
-      // omp bolds the whole crest, not just its centre cell.
-      const bold = intensity >= SHIMMER_TIER_HIGH ? "\x1b[1m" : "";
-      const boldReset = intensity >= SHIMMER_TIER_HIGH ? "\x1b[22m" : "";
+      // omp bolds the whole crest, not just its centre cell — and only the label's.
+      const crestBold = intensity >= SHIMMER_TIER_HIGH && !isHint;
+      const bold = crestBold ? "\x1b[1m" : "";
+      const boldReset = crestBold ? "\x1b[22m" : "";
       return `${bold}${fgAnsi(color)}${character}${FG_RESET}${boldReset}`;
     })
     .join("");
@@ -1273,9 +1265,17 @@ class OmpEditor extends CustomEditor {
       return;
     }
     const sessionName = currentSessionName(ctx);
-    // omp leaves the frame dim until it has a session accent to colour it with,
-    // rather than tinting it by thinking level — the level is already spelled out
-    // in the status bar a few cells away.
+    // Known divergence, not omp's behaviour: omp's `updateEditorBorderColor`
+    // tries bash mode, then python mode, then a session accent, and *falls back
+    // to `theme.getThinkingBorderColor(level)`* — so an unnamed session gets the
+    // thinking colour there, which a capture confirms (#e06c75 at `max` under
+    // dark-ember) where this frame stays dim. This keeps the frame quiet because
+    // the level is already spelled out in the status bar a few cells away;
+    // `ctx.thinkingLevel` is available if that should change.
+    //
+    // omp also derives its session accent from the theme's major colours
+    // (`getMajorThemeColorHexes`), so a named session's hue will not match this
+    // theme-independent hash either.
     const color = sessionName ? sessionAccentHex(sessionName) : HEX.overlay0;
     if (this.lastBorderColorState === color) return;
     this.lastBorderColorState = color;
@@ -1322,6 +1322,8 @@ class OmpEditor extends CustomEditor {
   }
 
   override render(width: number): string[] {
+    const ctx = this.getCtx();
+    if (ctx) syncThemePalette(ctx.ui.theme.name);
     if (editorReshapeDisabled || width < 4) return super.render(width);
     try {
       return this.renderOmpFrame(width);
@@ -1847,7 +1849,7 @@ function renderToolOneLine(target: string, title: string, width: number): string
   const lead = ` ${glyphs().status.bullet} `;
   const room = Math.max(0, width - visibleWidth(lead));
   const shownTitle = clipPlain(title, room);
-  const head = `${lead}${fgAnsi(HEX.lavender)}${shownTitle}${FG_RESET}`;
+  const head = `${lead}${fgAnsi(HEX.toolTitle)}${shownTitle}${FG_RESET}`;
   if (!target) return head;
   // One cell for the space that separates them.
   const left = room - visibleWidth(shownTitle) - 1;
@@ -1983,130 +1985,17 @@ function renderToolPart(part: RenderableToolPart | undefined, width: number): st
 // us is a shell command; anything it cannot classify stays a plain argument.
 // ───────────────────────────────────────────────────────────────────────────
 
-const SHELL_KEYWORDS = new Set([
-  "for", "in", "do", "done", "if", "then", "else", "elif", "fi", "while", "until",
-  "case", "esac", "select", "function", "return", "break", "continue", "local", "export",
-]);
-
-/** `|`, `||`, `&&`, `;`, `&`, and the redirection family. */
-const SHELL_OPERATOR_LEAD = /[|;&<>]/;
-/** Substitution and grouping brackets, which omp paints as punctuation and
- * which start a fresh command word inside. */
-const SHELL_BRACKET = /[()]/;
-const SHELL_SPACE = /\s/;
-/** Anything that ends a word. */
-const SHELL_WORD_BREAK = /[\s|;&<>()'"]/;
-/** `NAME=value` — an assignment, not a command. */
-const SHELL_ASSIGNMENT = /^([A-Za-z_]\w*)=/;
-
-function highlightShellCommand(command: string): string {
-  const fn = fgAnsi(HEX.blue);
-  const punct = fgAnsi(HEX.overlay2);
-  const variable = fgAnsi(HEX.text);
-  const string = fgAnsi(HEX.green);
-  const keyword = fgAnsi(HEX.mauve);
-  const comment = fgAnsi(HEX.overlay0);
-  const number = fgAnsi(HEX.peach);
-  const paint = (color: string, text: string): string => (text ? `${color}${text}${FG_RESET}` : "");
-
-  let out = "";
-  let index = 0;
-
-  while (index < command.length) {
-    const char = command[index];
-
-    if (SHELL_SPACE.test(char)) {
-      out += char;
-      index++;
-      continue;
-    }
-
-    if (char === "#") {
-      const end = command.indexOf("\n", index);
-      const stop = end === -1 ? command.length : end;
-      out += paint(comment, command.slice(index, stop));
-      index = stop;
-      continue;
-    }
-
-    if (char === "'" || char === '"') {
-      const quote = char;
-      let end = index + 1;
-      while (end < command.length && command[end] !== quote) {
-        if (command[end] === "\\" && quote === '"') end++;
-        end++;
-      }
-      const closed = end < command.length;
-      const body = command.slice(index + 1, closed ? end : command.length);
-      out += paint(punct, quote);
-      // omp lets an expansion break the string colour, `$` punctuation and the
-      // name beside it a variable, and leaves single quotes literal.
-      if (quote === '"') {
-        let rest = body;
-        while (rest.length > 0) {
-          const at = rest.search(/\$\{?\w/);
-          if (at === -1) break;
-          out += paint(string, rest.slice(0, at));
-          const name = /^\$\{?\w+\}?/.exec(rest.slice(at))?.[0] ?? "$";
-          out += paint(punct, name.slice(0, name.startsWith("${") ? 2 : 1));
-          out += paint(variable, name.slice(name.startsWith("${") ? 2 : 1));
-          rest = rest.slice(at + name.length);
-        }
-        out += paint(string, rest);
-      } else {
-        out += paint(string, body);
-      }
-      if (closed) out += paint(punct, quote);
-      index = closed ? end + 1 : command.length;
-      continue;
-    }
-
-    if (SHELL_BRACKET.test(char)) {
-      let end = index;
-      while (end < command.length && SHELL_BRACKET.test(command[end])) end++;
-      out += paint(punct, command.slice(index, end));
-      index = end;
-      continue;
-    }
-
-    if (SHELL_OPERATOR_LEAD.test(char)) {
-      let end = index;
-      while (end < command.length && SHELL_OPERATOR_LEAD.test(command[end])) end++;
-      out += paint(keyword, command.slice(index, end));
-      index = end;
-      continue;
-    }
-
-    let end = index;
-    while (end < command.length && !SHELL_WORD_BREAK.test(command[end])) end++;
-    const word = command.slice(index, end);
-    index = end;
-
-    const assignment = SHELL_ASSIGNMENT.exec(word);
-    if (assignment) {
-      // `NODE_ENV=production npm start` — the name is a variable, not a command.
-      out += paint(variable, assignment[1]) + paint(punct, "=") + paint(fn, word.slice(assignment[0].length));
-    } else if (SHELL_KEYWORDS.has(word)) {
-      out += paint(keyword, word);
-    } else if (word.startsWith("-")) {
-      // A flag reads as its dashes and its name, coloured apart; `--flag=value`
-      // keeps its value in the argument colour.
-      const dashes = /^-+/.exec(word)?.[0] ?? "-";
-      const rest = word.slice(dashes.length);
-      const eq = rest.indexOf("=");
-      out += paint(punct, dashes);
-      out += eq === -1
-        ? paint(variable, rest)
-        : paint(variable, rest.slice(0, eq)) + paint(punct, "=") + paint(fn, rest.slice(eq + 1));
-    } else if (/^\d+$/.test(word)) {
-      out += paint(number, word);
-    } else if (word.startsWith("$")) {
-      out += paint(punct, word.slice(0, word.startsWith("${") ? 2 : 1)) + paint(variable, word.slice(word.startsWith("${") ? 2 : 1));
-    } else {
-      out += paint(fn, word);
-    }
-  }
-  return out;
+/** omp's shell colouring lives in `shell-lexer.ts`; bind it to the live palette. */
+function shellColors(): ShellColors {
+  return {
+    fn: fgAnsi(HEX.shellFunction),
+    punct: fgAnsi(HEX.overlay2),
+    variable: fgAnsi(HEX.shellVariable),
+    string: fgAnsi(HEX.shellString),
+    keyword: fgAnsi(HEX.shellKeyword),
+    comment: fgAnsi(HEX.shellComment),
+    number: fgAnsi(HEX.shellNumber),
+  };
 }
 
 // The command string of a given tool call never changes, but the block
@@ -2119,7 +2008,7 @@ function highlightBashCommand(command: string): string[] {
   const cached = bashHighlightCache.get(command);
   if (cached !== undefined) return cached;
   if (bashHighlightCache.size >= BASH_HIGHLIGHT_CACHE_MAX) bashHighlightCache.clear();
-  const highlighted = highlightShellCommand(command).split("\n");
+  const highlighted = highlightShellCommand(command, shellColors()).split("\n");
   bashHighlightCache.set(command, highlighted);
   return highlighted;
 }
@@ -2440,7 +2329,9 @@ function segmentDiffRows(rows: readonly DiffBodyRow[]): DiffSegment[] {
 /** The gap row inserted where a sandwiched context run was thinned — omp
  * pushes a bare blank line there; inside a frame that reads as a hole, so
  * this renders as pi's dim gap idiom instead. */
-const DIFF_THINNED_GAP_ROW: DiffBodyRow = { line: `${fgAnsi(HEX_TOOL.dim)}…${FG_RESET}`, plain: "…", kind: "gap" };
+function diffThinnedGapRow(): DiffBodyRow {
+  return { line: `${fgAnsi(HEX_TOOL.dim)}…${FG_RESET}`, plain: "…", kind: "gap" };
+}
 
 /** omp's `truncateDiffByHunk` (its render-utils), both regimes, for the
  * settled collapsed view. When the change lines alone bust the line budget,
@@ -2495,7 +2386,7 @@ function capDiffRows(rows: DiffBodyRow[]): { kept: DiffBodyRow[]; hiddenLines: n
           if (beforeChange && afterChange) {
             if (segment.rows.length > allowed) {
               const half = Math.ceil(allowed / 2);
-              kept.push(...segment.rows.slice(0, half), DIFF_THINNED_GAP_ROW, ...segment.rows.slice(-half));
+              kept.push(...segment.rows.slice(0, half), diffThinnedGapRow(), ...segment.rows.slice(-half));
             } else {
               kept.push(...segment.rows);
             }
@@ -3371,6 +3262,8 @@ type PatchableTool = { __ompFramed?: boolean };
  * otherwise re-background and re-pad every visible line on every keystroke. */
 interface FramedToolMemo {
   width: number;
+  /** Extension palette used to build the colored rows. */
+  paletteName: string;
   /** Bitmask of the render-affecting flags; see `framedRender`. */
   flags: number;
   glyphPreset: GlyphPreset;
@@ -3397,6 +3290,7 @@ function patchToolCallFraming(): void {
   const originalRender = proto.render;
   const frameMemo = new WeakMap<FramedToolComponent, FramedToolMemo>();
   const framedRender = function (this: FramedToolComponent, width: number): string[] {
+    syncThemePalette(currentCtx?.ui.theme.name);
     if (this.hideComponent) return [];
 
     const profile = TOOL_PROFILES.get(this.toolName);
@@ -3464,6 +3358,7 @@ function patchToolCallFraming(): void {
     if (
       memo &&
       memo.width === width &&
+      memo.paletteName === activePaletteName &&
       memo.flags === flags &&
       memo.glyphPreset === glyphPreset &&
       memo.imageKey === this.imageComponents &&
@@ -3522,7 +3417,7 @@ function patchToolCallFraming(): void {
         lines.push(renderFrameContentRow(line, width, borderColor, barBg));
       }
       if (this.resultRendererComponent) {
-        lines.push(buildSectionBar(width, `${fgAnsi(HEX.lavender)}Output${FG_RESET}`, borderColor, barBg));
+        lines.push(buildSectionBar(width, `${fgAnsi(HEX.toolTitle)}Output${FG_RESET}`, borderColor, barBg));
         for (const line of resultLines) {
           lines.push(renderFrameContentRow(line, width, borderColor, barBg));
         }
@@ -3687,7 +3582,16 @@ function patchToolCallFraming(): void {
     // pi's core component owns one leading Spacer; keep it so consecutive
     // tool blocks have the same single blank separator as omp's transcript.
     lines.unshift("");
-    frameMemo.set(this, { width, flags, glyphPreset, rawCall, rawResult, imageKey: this.imageComponents, lines });
+    frameMemo.set(this, {
+      width,
+      paletteName: activePaletteName,
+      flags,
+      glyphPreset,
+      rawCall,
+      rawResult,
+      imageKey: this.imageComponents,
+      lines,
+    });
     return lines;
   };
 
@@ -4062,6 +3966,7 @@ function stopWidgetTicker(): void {
 
 /** Decorate a widget's rows, and stamp the clock if any of them was live. */
 function animateWidgetRows(rows: string[], host: WidgetHost): string[] {
+  syncThemePalette(currentCtx?.ui.theme.name);
   noteAgentCount(rows);
   // Keep this as a final parser-aware defensive check. Normalisation happens
   // before this function, but if a future control sequence is added to the
@@ -4303,6 +4208,7 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
     const flag = pi.getFlag(GLYPH_FLAG);
     if (isGlyphPreset(flag)) glyphPreset = flag;
     currentCtx = ctx;
+    syncThemePalette(ctx.ui.theme.name);
     // A session starting is not a turn, whatever the last one left running.
     agentWorking = false;
     stopSpinnerRotation();
@@ -4417,3 +4323,31 @@ export default function ompFeelExtension(pi: ExtensionAPI) {
 let currentCtx: ExtensionContext | undefined;
 let activeTui: TUI | undefined;
 let activeFooter: OmpFooter | undefined;
+
+let activePaletteName = "omp-dark-catppuccin";
+
+/** Keep extension-owned colors aligned with pi's selected theme. Pi exposes the
+ * active theme object to extensions, but not the raw `vars` map or the extra
+ * status-line keys omp uses, so those two palettes are mirrored here. Unknown
+ * themes retain the extension's established Catppuccin defaults. */
+function syncThemePalette(themeName: string | undefined): void {
+  // omp ships these under bare names (`dark-ember`); this extension prefixes its
+  // copies. Accept both so a theme is matched however it was installed.
+  const candidate = themeName?.startsWith("omp-") ? themeName : `omp-${themeName ?? ""}`;
+  const nextPaletteName = candidate in PALETTES ? candidate : "omp-dark-catppuccin";
+  if (nextPaletteName === activePaletteName) return;
+
+  activePaletteName = nextPaletteName;
+  HEX = PALETTES[nextPaletteName] ?? CATPPUCCIN_HEX;
+  cachedWorkingFrames = undefined;
+  bashHighlightCache.clear();
+  contextHighlightCache.clear();
+  contentPreviewCache.clear();
+  resultPreviewCache.clear();
+  outputTailCache.clear();
+  jsonTreeCache.clear();
+  activeFooter?.invalidate();
+  if (agentWorking && currentCtx?.mode === "tui" && currentCtx.hasUI) {
+    configureWorkingIndicator(currentCtx);
+  }
+}

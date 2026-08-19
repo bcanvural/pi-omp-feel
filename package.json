@@ -3,12 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Ports oh-my-pi (omp) dark-catppuccin styling and status-line feel to the pi coding agent.",
+  "description": "Ports oh-my-pi (omp) dark-catppuccin and dark-ember styling and status-line feel to the pi coding agent.",
   "license": "MIT",
-  "keywords": ["pi-package", "pi-extension", "theme", "omp", "catppuccin", "statusline"],
+  "keywords": ["pi-package", "pi-extension", "theme", "omp", "catppuccin", "ember", "statusline"],
   "files": ["src", "themes", "README.md"],
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"tests/*.test.ts\""
+  },
+  "engines": {
+    "node": ">=22.18"
   },
   "pi": {
     "extensions": ["./src/index.ts"],
