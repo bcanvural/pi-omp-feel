@@ -312,11 +312,11 @@ function applyGlyphPreset(preset: GlyphPreset): void {
 // Escape sequences the rendered lines can carry. Matching only CSI left OSC
 // hyperlinks and APC sequences behind — and pi's cursor marker is APC — so both
 // "is this row blank" and the bash wall-time match failed on any line carrying
-// one. pi-tui covers all three families in `extractAnsiCode` but does not
-// export it, so mirror its coverage: CSI, then OSC/APC up to either terminator
-// (BEL or ST).
+// one. Cover CSI plus the C1 and ESC-prefixed string controls (OSC/APC/DCS/SOS/PM)
+// up to their BEL or ST terminators. The sticky view below and stripAnsi must
+// use this same grammar so they agree about which bytes are non-printing.
 const ANSI_SEQ =
-  /[\u001b\u009b][[()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PRZcf-nqry=><]|\u001b[\]_][^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
+  /(?:\u001bP|\u0090|\u001bX|\u0098|\u001b\^|\u009e)[^\u001b\u009c]*(?:\u001b\\|\u009c)|(?:\u001b\]|\u009d)[^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)|(?:\u001b_|\u009f)[^\u0007\u001b\u009c]*(?:\u0007|\u001b\\|\u009c)|[\u001b\u009b][[()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PRZcf-nqry=><]/g;
 
 function stripAnsi(text: string): string {
   return text.replace(ANSI_SEQ, "");
@@ -3781,15 +3781,9 @@ function shimmerRun(text: string, accent: string, position: number): string {
     .join("");
 }
 
-/** The same sequences `stripAnsi` knows, matched at a position. The two must
- * agree: one counts the plain characters, the other finds the byte they start
- * at, and a sequence only one of them recognizes puts the cut in the wrong
- * place. A CSI-only pattern here used to miss an OSC hyperlink. */
-const ANSI_SEQUENCE_AT = new RegExp(ANSI_SEQ.source, "y");
-
 /** A hyperlink or a terminal marker, which a rebuilt head would drop the
  * opening half of. Cheaper to leave such a row undecorated than to carry it. */
-const OSC_OR_APC = /\x1b[\]_]/;
+const OSC_OR_APC = /(?:\x1b[\]_]|[\u009d\u009f])/;
 
 /** How many agents another extension last said were running, and when it said
  * so. omp carries this on its status line (`subagentsSegment`), and pi has no
@@ -3839,10 +3833,97 @@ function forgetAgentCount(): void {
 
 /** Any control character but ESC. A row carrying one does not occupy the single
  * terminal line pi accounted for — a newline or a tab in a tool preview is the
- * usual way that happens — so the rows below it are already displaced. Nothing
- * here can repair that, but repainting over it stacks another copy every frame,
- * which turns one displaced row into a trail of them. */
-const CONTROL_IN_ROW = /[\u0000-\u001a\u001c-\u001f\u007f]/;
+ * usual way that happens — so the rows below it are already displaced. */
+const CONTROL_IN_ROW = /[\u0000-\u001a\u001c-\u001f\u007f-\u009f]/;
+
+/** Parse one complete ANSI sequence without treating controls inside it as
+ * widget text. In particular, OSC 8 hyperlinks commonly end with BEL; that BEL
+ * is a terminator, not a physical newline to replace. */
+const ANSI_SEQUENCE_AT = new RegExp(ANSI_SEQ.source, "y");
+
+/** pi-tui treats each string returned by a component as one physical terminal
+ * row. Older foreign widgets can put a raw newline or tab in one string (the
+ * subagent widget does this for a multi-line shell command), so normalise that
+ * string before pi's diff renderer sees it. Merely declining our animation is
+ * not enough: the next ordinary editor repaint would still move the cursor by
+ * the wrong number of rows and leave a trail of stale widget lines behind. */
+function normalizeWidgetRow(row: string, width: number): string {
+  if (!CONTROL_IN_ROW.test(row) && !/[\u001b\u009b]/.test(row)) return row;
+
+  let changed = false;
+  let cursor = 0;
+  let normalized = "";
+  while (cursor < row.length) {
+    ANSI_SEQUENCE_AT.lastIndex = cursor;
+    const ansi = ANSI_SEQUENCE_AT.exec(row);
+    if (ansi) {
+      normalized += ansi[0];
+      cursor = ANSI_SEQUENCE_AT.lastIndex;
+      continue;
+    }
+
+    const codePoint = row.codePointAt(cursor);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    if (character === "\r" && row[cursor + 1] === "\n") {
+      normalized += " ";
+      cursor += 2;
+      changed = true;
+      continue;
+    }
+    // A lone ESC/C1 CSI is not a valid sequence we can preserve safely. It
+    // cannot itself create a row, but dropping it avoids leaking terminal
+    // state when a foreign widget hands us a partial escape.
+    const malformedEscape = character === "\u001b" || character === "\u009b";
+    if (CONTROL_IN_ROW.test(character) || malformedEscape) {
+      normalized += " ";
+      changed = true;
+    } else {
+      normalized += character;
+    }
+    cursor += character.length;
+  }
+
+  if (!changed) return row;
+  // The original widget already padded to width while LF counted as zero
+  // cells. Flattening adds cells, so make the no-ellipsis/no-padding policy
+  // explicit and let pi-tui clear the remainder of the physical row.
+  return truncateToWidth(normalized, Math.max(0, width), "", false);
+}
+
+function normalizeWidgetRows(rows: string[], width: number): string[] {
+  let changed = false;
+  const normalized = rows.map(row => {
+    const safe = normalizeWidgetRow(row, width);
+    if (safe !== row) changed = true;
+    return safe;
+  });
+  return changed ? normalized : rows;
+}
+
+/** Check for controls that are outside a complete ANSI sequence. The BEL that
+ * terminates OSC 8 is intentionally skipped, so a hyperlink does not disable
+ * animation for every other clean row in the widget. */
+function hasControlOutsideAnsi(row: string): boolean {
+  if (!CONTROL_IN_ROW.test(row) && !/[\u001b\u009b]/.test(row)) return false;
+
+  let cursor = 0;
+  while (cursor < row.length) {
+    ANSI_SEQUENCE_AT.lastIndex = cursor;
+    const ansi = ANSI_SEQUENCE_AT.exec(row);
+    if (ansi) {
+      cursor = ANSI_SEQUENCE_AT.lastIndex;
+      continue;
+    }
+
+    const codePoint = row.codePointAt(cursor);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    if (CONTROL_IN_ROW.test(character) || character === "\u001b" || character === "\u009b") return true;
+    cursor += character.length;
+  }
+  return false;
+}
 
 /** Where the `index`-th plain character starts, in bytes. */
 function ansiOffsetOf(row: string, index: number): number {
@@ -3982,10 +4063,11 @@ function stopWidgetTicker(): void {
 /** Decorate a widget's rows, and stamp the clock if any of them was live. */
 function animateWidgetRows(rows: string[], host: WidgetHost): string[] {
   noteAgentCount(rows);
-  // One malformed row disqualifies the whole widget, not just itself: the
-  // damage is to the rows below it, and those are the ones a repaint would
-  // duplicate. Leaving the widget alone lets its own extension settle it.
-  if (rows.some(row => CONTROL_IN_ROW.test(row))) {
+  // Keep this as a final parser-aware defensive check. Normalisation happens
+  // before this function, but if a future control sequence is added to the
+  // widget output, declining to repaint is still safer than moving pi's row
+  // cursor over it.
+  if (rows.some(hasControlOutsideAnsi)) {
     stopWidgetTicker();
     return rows;
   }
@@ -4016,7 +4098,7 @@ function patchWidgetAnimation(): void {
   proto.setExtensionWidget = function (this: unknown, key: string, content: unknown, options?: unknown): void {
     // A widget given as plain rows is a fixed list pi wraps itself; there is no
     // render of ours to sit in front of, and nothing there animates anyway.
-    if (widgetAnimationDisabled || typeof content !== "function" || !ANIMATED_WIDGET_KEYS.has(key)) {
+    if (typeof content !== "function" || !ANIMATED_WIDGET_KEYS.has(key)) {
       if (content === undefined) {
         stopWidgetTicker();
         if (ANIMATED_WIDGET_KEYS.has(key)) forgetAgentCount();
@@ -4037,19 +4119,23 @@ function patchWidgetAnimation(): void {
       const innerRender = component.render.bind(component);
       const animated = (width: number): string[] => {
         const rows = innerRender(width);
-        if (widgetAnimationDisabled) return rows;
+        // Do this even when animation has degraded: the one-line contract is
+        // independent of the shimmer and is what keeps pi's differential
+        // renderer aligned with the terminal after a keypress.
+        const safeRows = normalizeWidgetRows(rows, width);
+        if (widgetAnimationDisabled) return safeRows;
         try {
-          return animateWidgetRows(rows, host);
+          return animateWidgetRows(safeRows, host);
         } catch (error) {
           widgetAnimationDisabled = true;
           stopWidgetTicker();
           reportDegraded("widget-animation", error, {
             width,
             key,
-            rows: rows.length,
-            "first row": safeProbe(() => JSON.stringify(stripAnsi(rows[0] ?? "").slice(0, 80))),
+            rows: safeRows.length,
+            "first row": safeProbe(() => JSON.stringify(stripAnsi(safeRows[0] ?? "").slice(0, 80))),
           });
-          return rows;
+          return safeRows;
         }
       };
       // A component whose `render` cannot be written to — frozen, or defined as
